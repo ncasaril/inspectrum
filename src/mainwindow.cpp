@@ -64,6 +64,15 @@ MainWindow::MainWindow()
 
     // Set defaults after making connections so everything is in sync
     dock->setDefaults();
+    // Show cursor (mouse) position in time and frequency in the status bar
+    connect(plots, &PlotView::mousePositionChanged,
+            this, [this](double timePos, double freqPos) {
+        // Format with 6 decimal places for time, frequency in Hz
+        QString msg = QString("Time: %1 s   Freq: %2 Hz")
+            .arg(timePos, 0, 'f', 6)
+            .arg(freqPos, 0, 'f', 0);
+        statusBar()->showMessage(msg, 0);
+    });
 
 }
 

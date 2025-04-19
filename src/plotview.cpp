@@ -70,6 +70,24 @@ void PlotView::addPlot(Plot *plot)
 void PlotView::mouseMoveEvent(QMouseEvent *event)
 {
     updateAnnotationTooltip(event);
+    // Emit current mouse position in time and frequency for status display
+    {
+        // Map X position to time (seconds)
+        int x = event->pos().x();
+        int hScroll = horizontalScrollBar()->value();
+        size_t sampleIdx = columnToSample(x + hScroll);
+        double timePos = (sampleRate > 0.0) ? (sampleIdx / sampleRate) : 0.0;
+        // Map Y position to frequency offset (Hz), with DC at center of spectrogram
+        double freqPos = 0.0;
+        int vScroll = verticalScrollBar()->value();
+        int contentY = event->pos().y() + vScroll;
+        int plotH = spectrogramPlot->height();
+        if (contentY >= 0 && contentY < plotH && sampleRate > 0.0) {
+            double hzPerPixel = sampleRate / plotH;
+            freqPos = ((plotH / 2.0) - contentY) * hzPerPixel;
+        }
+        emit mousePositionChanged(timePos, freqPos);
+    }
     QGraphicsView::mouseMoveEvent(event);
 }
 
@@ -227,7 +245,7 @@ bool PlotView::viewportEvent(QEvent *event) {
         QWheelEvent *wheelEvent = (QWheelEvent*)event;
         if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
             bool canZoomIn = zoomLevel < fftSize;
-            bool canZoomOut = zoomLevel > 1;
+            bool canZoomOut = zoomLevel > -64;
             int delta = wheelEvent->angleDelta().y();
             if ((delta > 0 && canZoomIn) || (delta < 0 && canZoomOut)) {
                 scrollZoomStepsAccumulated += delta;

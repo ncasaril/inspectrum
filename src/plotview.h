@@ -41,6 +41,12 @@ signals:
     void timeSelectionChanged(float time);
     void zoomIn();
     void zoomOut();
+    /**
+     * Emitted when the mouse moves over the plot area.
+     * @param time     Time position in seconds corresponding to mouse X coordinate
+     * @param frequency  Frequency offset in Hz corresponding to mouse Y coordinate in spectrogram
+     */
+    void mousePositionChanged(double time, double frequency);
 
 public slots:
     void cursorsMoved();
