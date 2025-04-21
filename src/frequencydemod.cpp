@@ -19,8 +19,7 @@
 
 #include "frequencydemod.h"
 #include <liquid/liquid.h>
-#include <liquid/liquid.h>
-#include "util.h"
+#include <complex>
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
@@ -34,24 +33,28 @@ FrequencyDemod::~FrequencyDemod()
     freqdem_destroy(fdem_);
 }
 
-void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
+void FrequencyDemod::work(void *input, void *output, int count, size_t /*sampleid*/)
 {
     auto in  = static_cast<std::complex<float>*>(input);
     auto out = static_cast<float*>(output);
-    // decimation factor: reduce output points to match trace tile width
-    size_t decim = (count > 1000) ? size_t(count / 1000) : 1;
-    float lastDem = 0.0f;
-    // run filter on every sample to maintain state, but only store every decim-th output
-    for (int i = 0; i < count; i++) {
-        float dem;
-        freqdem_demodulate(fdem_, in[i], &dem);
-        lastDem = dem;
-        if (static_cast<size_t>(i) % decim == 0) {
+    if (!cheapMode_) {
+        // full FIR-based demod: run filter on every sample
+        for (int i = 0; i < count; i++) {
+            float dem;
+            // interpret std::complex<float> bits as liquid_float_complex
+            freqdem_demodulate(fdem_, *reinterpret_cast<liquid_float_complex*>(&in[i]), &dem);
             out[i] = dem;
         }
-    }
-    // ensure last sample is output
-    if (count > 0 && (size_t(count - 1) % decim) != 0) {
-        out[count - 1] = lastDem;
+    } else {
+        // cheap instantaneous-frequency demod: phase diff per sample
+        if (count > 0) {
+            std::complex<float> prev = in[0];
+            out[0] = 0.0f;
+            for (int i = 1; i < count; i++) {
+                float dem = std::arg(in[i] * std::conj(prev));
+                prev = in[i];
+                out[i] = dem;
+            }
+        }
     }
 }

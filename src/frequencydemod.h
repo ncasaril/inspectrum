@@ -18,6 +18,7 @@
  */
 
 #pragma once
+#include <liquid/liquid.h>
 
 #include "samplebuffer.h"
 
@@ -30,4 +31,11 @@ public:
 private:
     // Liquid-DSP frequency demodulator object
     freqdem      fdem_;
+    // if true, use fast instantaneous-frequency demod instead of full FIR
+    bool         cheapMode_ = false;
+public:
+    /**
+     * Toggle fast-path demodulation mode (instantaneous phase diff).
+     */
+    void setCheapDemod(bool enabled) { cheapMode_ = enabled; }
 };
