@@ -55,6 +55,12 @@ MainWindow::MainWindow()
     connect(dock->annoLabelCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnoLabels);
     connect(dock->commentsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotationCommentsTooltips);
     connect(dock->annoColorCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnoColors);
+    // Connect derived plot height adjustment
+    connect(dock, &SpectrogramControls::derivedHeightChanged, plots, &PlotView::setDerivedPlotHeight);
+    // fast-path FM demodulation toggle
+    connect(dock, &SpectrogramControls::fastDemodChanged, plots, &PlotView::enableFastDemod);
+    // allow user to control number of threads in the Qt thread pool
+    connect(dock, &SpectrogramControls::threadsChanged, plots, &PlotView::setMaxThreads);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

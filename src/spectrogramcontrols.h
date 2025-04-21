@@ -39,6 +39,13 @@ public:
 signals:
     void fftOrZoomChanged(int fftSize, int zoomLevel);
     void openFile(QString fileName);
+    void derivedHeightChanged(int height);
+    // toggle fast-path (instantaneous) frequency demod in derived trace plot
+    void fastDemodChanged(bool enabled);
+    /**
+     * Requested number of threads to use for tile rendering.
+     */
+    void threadsChanged(int threads);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -78,4 +85,11 @@ public:
     QCheckBox *annoLabelCheckBox;
     QCheckBox *commentsCheckBox;
     QCheckBox *annoColorCheckBox;
+    QSpinBox *derivedPlotHeightSpinBox;
+    // fast (cheap) demodulation mode for FM traces
+    QCheckBox *fastDemodCheckBox;
+    /**
+     * Spinbox to select number of threads for concurrent tasks.
+     */
+    QSpinBox   *threadCountSpinBox;
 };
