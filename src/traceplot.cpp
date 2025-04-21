@@ -26,46 +26,65 @@
 
 TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source) {
     connect(this, &TracePlot::imageReady, this, &TracePlot::handleImage);
+    // debounce timer: batch up rapid tile requests
+    debounceTimer = new QTimer(this);
+    debounceTimer->setSingleShot(true);
+    debounceTimer->setInterval(50); // ms delay
+    connect(debounceTimer, &QTimer::timeout,
+            this, &TracePlot::schedulePendingTiles);
 }
 
 void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
+    // start a fresh set of needed tiles for this paint pass
+    currentFrameKeys.clear();
     if (sampleRange.length() == 0) return;
 
     int samplesPerColumn = std::max(1UL, sampleRange.length() / rect.width());
-    int samplesPerTile = tileWidth * samplesPerColumn;
+    // dynamic tile size to match thread count
+    int threads = QThreadPool::globalInstance()->maxThreadCount();
+    if (threads < 1) threads = 1;
+    int tilePx = rect.width() / threads;
+    if (tilePx < 1) tilePx = 1;
+    int samplesPerTile = tilePx * samplesPerColumn;
     size_t tileID = sampleRange.minimum / samplesPerTile;
     size_t tileOffset = sampleRange.minimum % samplesPerTile; // Number of samples to skip from first image tile
     int xOffset = tileOffset / samplesPerColumn; // Number of columns to skip from first image tile
 
     // Paint first (possibly partial) tile
+    // Paint first (possibly partial) tile
     painter.drawPixmap(
-        QRect(rect.x(), rect.y(), tileWidth - xOffset, height()),
-        getTile(tileID++, samplesPerTile),
-        QRect(xOffset, 0, tileWidth - xOffset, height())
+        QRect(rect.x(), rect.y(), tilePx - xOffset, height()),
+        getTile(tileID++, samplesPerTile, tilePx),
+        QRect(xOffset, 0, tilePx - xOffset, height())
     );
 
     // Paint remaining tiles
-    for (int x = tileWidth - xOffset; x < rect.right(); x += tileWidth) {
+    // Paint remaining tiles
+    for (int x = tilePx - xOffset; x < rect.right(); x += tilePx) {
         painter.drawPixmap(
-            QRect(x, rect.y(), tileWidth, height()),
-            getTile(tileID++, samplesPerTile)
+            QRect(x, rect.y(), tilePx, height()),
+            getTile(tileID++, samplesPerTile, tilePx)
         );
     }
 }
 
-QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount)
+QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
 {
-    QPixmap pixmap(tileWidth, height());
+    QPixmap pixmap(tileWidthPx, height());
+    // build tile key and mark as desired for this frame
     QString key;
-    QTextStream(&key) << "traceplot_" << this << "_" << tileID << "_" << sampleCount;
+    QTextStream ts(&key);
+    ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount;
+    currentFrameKeys.insert(key);
+    // if we already have a cached pixmap, return it immediately
     if (QPixmapCache::find(key, &pixmap))
         return pixmap;
 
-    if (!tasks.contains(key)) {
-        range_t<size_t> sampleRange{tileID * sampleCount, (tileID + 1) * sampleCount};
-        QtConcurrent::run(this, &TracePlot::drawTile, key, QRect(0, 0, tileWidth, height()), sampleRange);
-        tasks.insert(key);
+    // schedule a new tile-draw if not already running or pending
+    if (!tasks.contains(key) && !pendingInfo.contains(key)) {
+        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx});
+        debounceTimer->start();
     }
     pixmap.fill(Qt::transparent);
     return pixmap;
@@ -73,6 +92,12 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount)
 
 void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange)
 {
+    // if this tile is no longer part of the current view, abort early
+    if (!currentFrameKeys.contains(key)) {
+        tasks.remove(key);
+        return;
+    }
+    // render into an offscreen image
     QImage image(rect.size(), QImage::Format_ARGB32);
     image.fill(Qt::transparent);
 
@@ -118,40 +143,81 @@ void TracePlot::handleImage(QString key, QImage image)
 
 void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples, size_t count, int step = 1)
 {
+    // Build a path by down-sampling to at most one point per pixel column.
     QPainterPath path;
-    range_t<float> xRange{0, rect.width() - 2.f};
-    range_t<float> yRange{0, rect.height() - 2.f};
-    const float xStep = 1.0 / count * rect.width();
+    const int w = rect.width();
+    const int h = rect.height();
+    range_t<float> xRange{0.f, float(w - 2)};
+    range_t<float> yRange{0.f, float(h - 2)};
 
-    // pre-normalise
-    double min = 1.0e6;
-    double max = -1.0e6;
-    double mid = 0;
-    double range = 1;
-
-    for (size_t i = 0; i < count; i++) {
-        float sample = samples[i*step];
-        min = sample < min ? sample : min;
-        max = sample > max ? sample : max;
+    // Compute normalization range
+    double minv = 1.0e6, maxv = -1.0e6;
+    for (size_t i = 0; i < count; ++i) {
+        float s = samples[i * step];
+        if (s < minv) minv = s;
+        if (s > maxv) maxv = s;
     }
-    range = max - min;
-    mid = (range)/2.0f;
-    //printf("%s:%d: [%.1e, %.1e, %.1e] %.ef\n", __func__, __LINE__, min, mid, max, range);
-    double irange = 1.0f/range;
+    double range = maxv - minv;
+    if (range <= 0.0)
+        range = 1.0;
+    double mid = (minv + maxv) * 0.5;
+    double invRange = 1.0 / range;
 
-    for (size_t i = 0; i < count; i++) {
-        float sample = samples[i*step];
-        sample = (sample - mid)*irange;
-        float x = i * xStep;
-        float y = (1 - sample) * (rect.height() / 2);
+    // Compute x-step per sample
+    const double xStep = double(w) / double(count);
+    // Down-sample: at most one point per pixel
+    size_t decim = 1;
+    if (size_t(w) < count)
+        decim = (count + w - 1) / w;  // ceil(count/w)
+
+    bool first = true;
+    // Plot samples at intervals of decim
+    for (size_t i = 0; i < count; i += decim) {
+        float s = samples[i * step];
+        double norm = (s - mid) * invRange;
+        double x = i * xStep;
+        double y = (1.0 - norm) * (h * 0.5);
 
         x = xRange.clip(x) + rect.x();
         y = yRange.clip(y) + rect.y();
 
-        if (i == 0)
+        if (first) {
             path.moveTo(x, y);
-        else
+            first = false;
+        } else {
             path.lineTo(x, y);
+        }
+    }
+    // Ensure last sample is included
+    if (count > 0 && (count - 1) % decim != 0) {
+        float s = samples[(count - 1) * step];
+        double norm = (s - mid) * invRange;
+        double x = double(w - 1);
+        double y = (1.0 - norm) * (h * 0.5);
+
+        x = xRange.clip(x) + rect.x();
+        y = yRange.clip(y) + rect.y();
+        path.lineTo(x, y);
     }
     painter.drawPath(path);
+}
+ 
+// Slot: called when debounce timer fires; schedule all pending tile draws
+void TracePlot::schedulePendingTiles()
+{
+    // take current pending list and clear it
+    QHash<QString, PendingInfo> info = std::move(pendingInfo);
+    pendingInfo.clear();
+    for (auto it = info.constBegin(); it != info.constEnd(); ++it) {
+        const QString &key = it.key();
+        size_t tileID = it.value().tileID;
+        size_t sampleCount = it.value().sampleCount;
+        int tilePx = it.value().tileWidth;
+        range_t<size_t> sampleRange{ tileID * sampleCount,
+                                    (tileID + 1) * sampleCount };
+        // launch background draw (rect size uses tilePx)
+        QtConcurrent::run(this, &TracePlot::drawTile,
+                         key, QRect(0, 0, tilePx, height()), sampleRange);
+        tasks.insert(key);
+    }
 }
