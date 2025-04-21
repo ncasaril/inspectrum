@@ -19,20 +19,42 @@
 
 #include "frequencydemod.h"
 #include <liquid/liquid.h>
-#include "util.h"
+#include <complex>
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
-
+    // create the demodulator once
+    fdem_ = freqdem_create(relativeBandwidth() / 2.0);
 }
 
-void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
+FrequencyDemod::~FrequencyDemod()
 {
-    auto in = static_cast<std::complex<float>*>(input);
+    // destroy the demodulator
+    freqdem_destroy(fdem_);
+}
+
+void FrequencyDemod::work(void *input, void *output, int count, size_t /*sampleid*/)
+{
+    auto in  = static_cast<std::complex<float>*>(input);
     auto out = static_cast<float*>(output);
-    freqdem fdem = freqdem_create(relativeBandwidth() / 2.0);
-    for (int i = 0; i < count; i++) {
-        freqdem_demodulate(fdem, in[i], &out[i]);
+    if (!cheapMode_) {
+        // full FIR-based demod: run filter on every sample
+        for (int i = 0; i < count; i++) {
+            float dem;
+            // interpret std::complex<float> bits as liquid_float_complex
+            freqdem_demodulate(fdem_, *reinterpret_cast<liquid_float_complex*>(&in[i]), &dem);
+            out[i] = dem;
+        }
+    } else {
+        // cheap instantaneous-frequency demod: phase diff per sample
+        if (count > 0) {
+            std::complex<float> prev = in[0];
+            out[0] = 0.0f;
+            for (int i = 1; i < count; i++) {
+                float dem = std::arg(in[i] * std::conj(prev));
+                prev = in[i];
+                out[i] = dem;
+            }
+        }
     }
-    freqdem_destroy(fdem);
 }

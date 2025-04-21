@@ -18,6 +18,8 @@
  */
 
 #include "plotview.h"
+#include "frequencydemod.h"
+#include <QPixmapCache>
 #include <iostream>
 #include <fstream>
 #include <QtGlobal>
@@ -36,8 +38,9 @@
 #include <QToolTip>
 #include <QVBoxLayout>
 #include "plots.h"
+#include <QThreadPool>
 
-PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0})
+PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), derivedPlotHeight(200)
 {
     mainSampleSource = input;
     setDragMode(QGraphicsView::ScrollHandDrag);
@@ -61,9 +64,35 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0})
     mainSampleSource->subscribe(this);
 }
 
+void PlotView::enableFastDemod(bool enabled)
+{
+    // clear any cached trace tiles so new demod data is used
+    QPixmapCache::clear();
+    // walk all derived TracePlot instances and update their demod mode
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
+                fd->setCheapDemod(enabled);
+            }
+        }
+    }
+    // repaint everything
+    viewport()->update();
+}
+ 
+void PlotView::setMaxThreads(int threads)
+{
+    // configure the global QThreadPool for QtConcurrent::run
+    QThreadPool::globalInstance()->setMaxThreadCount(threads);
+}
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
+    // If this is a derived plot (not the main spectrogram), set its height
+    if (plots.size() > 1) {
+        plot->setPlotHeight(derivedPlotHeight);
+    }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
 
@@ -122,21 +151,33 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
 {
     QMenu menu;
 
-    // Get selected plot
-    Plot *selectedPlot = nullptr;
-    auto it = plots.begin();
-    int y = -verticalScrollBar()->value();
-    for (; it != plots.end(); it++) {
-        auto&& plot = *it;
-        if (range_t<int>{y, y + plot->height()}.contains(event->pos().y())) {
-            selectedPlot = plot.get();
-            break;
-        }
-        y += plot->height();
-    }
-    if (selectedPlot == nullptr)
-        return;
+    // Determine which plot was clicked: spectrogram (index 0) or a derived plot (index >=1)
+    int clickX = event->pos().x();
+    int clickY = event->pos().y();
+    int hscroll = horizontalScrollBar()->value();
+    size_t clickSample = columnToSample(clickX + hscroll);
+    int viewportH = viewport()->height();
 
+    Plot *selectedPlot = nullptr;
+    size_t plotIndex = 0;
+    // Check if click is in derived plot area (fixed at bottom)
+    if (plots.size() > 1 && clickY >= viewportH - derivedPlotHeight) {
+        int posInDerived = clickY - (viewportH - derivedPlotHeight);
+        plotIndex = 1 + posInDerived / derivedPlotHeight;
+        if (plotIndex >= plots.size())
+            return;
+        selectedPlot = plots[plotIndex].get();
+    } else {
+        // Spectrogram area (scrollable)
+        int contentY = clickY + verticalScrollBar()->value();
+        if (contentY < 0 || contentY >= spectrogramPlot->height())
+            return;
+        plotIndex = 0;
+        selectedPlot = plots[0].get();
+    }
+
+    // Compute center position for recentering
+    int centerX = viewport()->width() / 2;
     // Add actions to add derived plots
     // that are compatible with selectedPlot's output
     QMenu *plotsMenu = menu.addMenu("Add derived plot");
@@ -149,7 +190,12 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         connect(
             action, &QAction::triggered,
             this, [=]() {
+                // Add the new derived plot
                 addPlot(plotCreator(src));
+                // Re-center view so clickSample is at center
+                this->zoomSample = clickSample;
+                this->zoomPos = centerX;
+                this->updateView(true);
             }
         );
         plotsMenu->addAction(action);
@@ -193,16 +239,16 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     );
     menu.addAction(save);
 
-    // Add action to remove the selected plot
+    // Add action to remove the selected plot (only for derived plots)
     auto rem = new QAction("Remove plot", &menu);
     connect(
         rem, &QAction::triggered,
         this, [=]() {
-            plots.erase(it);
+            if (plotIndex > 0 && plotIndex < plots.size())
+                plots.erase(plots.begin() + plotIndex);
         }
     );
-    // Don't allow remove the first plot (the spectrogram)
-    rem->setEnabled(it != plots.begin());
+    rem->setEnabled(plotIndex > 0);
     menu.addAction(rem);
 
     updateViewRange(false);
@@ -506,33 +552,62 @@ void PlotView::paintEvent(QPaintEvent *event)
 {
     if (mainSampleSource == nullptr) return;
 
-    QRect rect = QRect(0, 0, width(), height());
+    // Full viewport rectangle
+    QRect viewRect(0, 0, width(), height());
     QPainter painter(viewport());
-    painter.fillRect(rect, Qt::black);
+    painter.fillRect(viewRect, Qt::black);
 
-
-#define PLOT_LAYER(paintFunc)                                                   \
-    {                                                                           \
-        int y = -verticalScrollBar()->value();                                  \
-        for (auto&& plot : plots) {                                             \
-            QRect rect = QRect(0, y, width(), plot->height());                  \
-            plot->paintFunc(painter, rect, viewRange);                          \
-            y += plot->height();                                                \
-        }                                                                       \
+    // Determine heights: spectrogram and derived plots
+    if (plots.empty()) return;
+    Plot *specPlot = plots.front().get();
+    int specHeight = specPlot->height();
+    int derivedHeight = 0;
+    for (size_t i = 1; i < plots.size(); ++i) {
+        derivedHeight += plots[i]->height();
     }
 
-    PLOT_LAYER(paintBack);
-    PLOT_LAYER(paintMid);
-    PLOT_LAYER(paintFront);
-    if (cursorsEnabled)
-        cursors.paintFront(painter, rect, viewRange);
+    // Draw spectrogram plot in top region with vertical scrolling
+    int yOffset = -verticalScrollBar()->value();
+    QRect specRect(0, yOffset, width(), specHeight);
+    specPlot->paintBack(painter, specRect, viewRange);
+    specPlot->paintMid(painter, specRect, viewRange);
+    specPlot->paintFront(painter, specRect, viewRange);
 
+    // Draw cursors and time scale over spectrogram
+    if (cursorsEnabled) {
+        cursors.paintFront(painter, specRect, viewRange);
+    }
     if (timeScaleEnabled) {
-        paintTimeScale(painter, rect, viewRange);
+        paintTimeScale(painter, specRect, viewRange);
     }
 
-
-#undef PLOT_LAYER
+    // Draw derived plots in a fixed area at the bottom (always visible)
+    if (derivedHeight > 0) {
+        // Back layer
+        int y = viewRect.height() - derivedHeight;
+        for (size_t i = 1; i < plots.size(); ++i) {
+            Plot *plot = plots[i].get();
+            QRect rect(0, y, width(), plot->height());
+            plot->paintBack(painter, rect, viewRange);
+            y += plot->height();
+        }
+        // Mid layer
+        y = viewRect.height() - derivedHeight;
+        for (size_t i = 1; i < plots.size(); ++i) {
+            Plot *plot = plots[i].get();
+            QRect rect(0, y, width(), plot->height());
+            plot->paintMid(painter, rect, viewRange);
+            y += plot->height();
+        }
+        // Front layer
+        y = viewRect.height() - derivedHeight;
+        for (size_t i = 1; i < plots.size(); ++i) {
+            Plot *plot = plots[i].get();
+            QRect rect(0, y, width(), plot->height());
+            plot->paintFront(painter, rect, viewRange);
+            y += plot->height();
+        }
+    }
 }
 
 void PlotView::paintTimeScale(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
@@ -638,8 +713,23 @@ void PlotView::updateView(bool reCenter, bool expanding)
     if (!expanding) {
         updateViewRange(reCenter);
     }
-    horizontalScrollBar()->setMaximum(std::max(0, sampleToColumn(mainSampleSource->count()) - width()));
-    verticalScrollBar()->setMaximum(std::max(0, plotsHeight() - viewport()->height()));
+    // Horizontal scroll based on total samples
+    horizontalScrollBar()->setMaximum(
+        std::max(0, sampleToColumn(mainSampleSource->count()) - width())
+    );
+    // Vertical scroll only for spectrogram area; derived plots are fixed at bottom
+    // Compute total height of derived plots
+    int derivedHeight = 0;
+    for (size_t i = 1; i < plots.size(); ++i) {
+        derivedHeight += plots[i]->height();
+    }
+    // Effective viewport height available to spectrogram
+    int specViewHeight = std::max(0, viewport()->height() - derivedHeight);
+    // Spectrogram plot height (first plot)
+    int specHeight = plots.empty() ? 0 : plots.front()->height();
+    verticalScrollBar()->setMaximum(
+        std::max(0, specHeight - specViewHeight)
+    );
 
     if (expanding) {
         updateViewRange(reCenter);
@@ -705,6 +795,15 @@ void PlotView::enableAnnoColors(bool enabled)
         spectrogramPlot->enableAnnoColors(enabled);
     
     viewport()->update();
+}
+// Adjust the height of derived plots (all except the primary spectrogram)
+void PlotView::setDerivedPlotHeight(int height)
+{
+    derivedPlotHeight = height;
+    for (size_t i = 1; i < plots.size(); ++i) {
+        plots[i]->setPlotHeight(derivedPlotHeight);
+    }
+    updateView();
 }
 
 int PlotView::sampleToColumn(size_t sample)

@@ -21,7 +21,7 @@ if (MSVC)
 endif (MSVC)
 
 if (NOT CMAKE_CXX_FLAGS)
-    set(CMAKE_CXX_FLAGS "-O2 -ggdb")
+    set(CMAKE_CXX_FLAGS "-O2 -ggdb -march=native")
 endif (NOT CMAKE_CXX_FLAGS)
 
 # This only works in cmake >3.1

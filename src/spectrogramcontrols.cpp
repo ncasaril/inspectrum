@@ -106,6 +106,29 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     annoColorCheckBox = new QCheckBox(widget);
     layout->addRow(new QLabel(tr("Annotation Colors:")), annoColorCheckBox);
 
+    // Derived plots settings
+    layout->addRow(new QLabel()); // spacer
+    layout->addRow(new QLabel(tr("<b>Derived Plots</b>")));
+    derivedPlotHeightSpinBox = new QSpinBox(widget);
+    derivedPlotHeightSpinBox->setRange(20, 1000);
+    derivedPlotHeightSpinBox->setValue(200);
+    layout->addRow(new QLabel(tr("Plot height:")), derivedPlotHeightSpinBox);
+    connect(derivedPlotHeightSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::derivedHeightChanged);
+    // Fast-path instantaneous-frequency FM demodulation
+    fastDemodCheckBox = new QCheckBox(widget);
+    fastDemodCheckBox->setCheckState(Qt::Unchecked);
+    layout->addRow(new QLabel(tr("Fast-path FM demod:")), fastDemodCheckBox);
+    connect(fastDemodCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::fastDemodChanged);
+    // Thread count for concurrent tile rendering
+    threadCountSpinBox = new QSpinBox(widget);
+    threadCountSpinBox->setRange(1, 64);
+    threadCountSpinBox->setValue(8);
+    layout->addRow(new QLabel(tr("Threads:")), threadCountSpinBox);
+    connect(threadCountSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::threadsChanged);
+
     widget->setLayout(layout);
     setWidget(widget);
 

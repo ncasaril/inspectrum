@@ -22,6 +22,9 @@
 #include "abstractsamplesource.h"
 #include "plot.h"
 #include "util.h"
+#include <QTimer>
+#include <QHash>
+#include <QPair>
 
 class TracePlot : public Plot
 {
@@ -39,11 +42,26 @@ signals:
 public slots:
     void handleImage(QString key, QImage image);
 
-private:
-    QSet<QString> tasks;
-    const int tileWidth = 1000;
+private slots:
+    // Debounce timer expired: schedule all pending tile-draw tasks
+    void schedulePendingTiles();
 
-    QPixmap getTile(size_t tileID, size_t sampleCount);
+private:
+    // In-process tile keys
+    QSet<QString> tasks;
+    // Tiles waiting to be scheduled: key -> (tileID, sampleCount, tileWidthPx)
+    struct PendingInfo { size_t tileID; size_t sampleCount; int tileWidth; };
+    QHash<QString, PendingInfo> pendingInfo;
+    // Keys desired in the current paint frame (for early-exit)
+    QSet<QString> currentFrameKeys;
+    // Debounce timer for batching tile requests
+    QTimer *debounceTimer;
+    // Width of each tile in pixels
+    // default tile width in pixels (fallback)
+    const int defaultTileWidth = 1000;
+
+    // Request the pixmap for a given tile (width in pixels drives sample count)
+    QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);
     void plotTrace(QPainter &painter, const QRect &rect, float *samples, size_t count, int step);
 };
