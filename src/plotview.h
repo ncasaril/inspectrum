@@ -62,6 +62,15 @@ public slots:
     void setFFTAndZoom(int fftSize, int zoomLevel);
     void setPowerMin(int power);
     void setPowerMax(int power);
+    void setDerivedPlotHeight(int height);
+    /**
+     * Enable or disable the fast-path (cheap) FM demodulation mode
+     */
+    void enableFastDemod(bool enabled);
+    /**
+     * Set maximum threads for background tile rendering.
+     */
+    void setMaxThreads(int threads);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -108,4 +117,5 @@ private:
 
     int sampleToColumn(size_t sample);
     size_t columnToSample(int col);
+    int derivedPlotHeight;
 };
