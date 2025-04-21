@@ -122,8 +122,26 @@ void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples, 
     range_t<float> xRange{0, rect.width() - 2.f};
     range_t<float> yRange{0, rect.height() - 2.f};
     const float xStep = 1.0 / count * rect.width();
+
+    // pre-normalise
+    double min = 1.0e6;
+    double max = -1.0e6;
+    double mid = 0;
+    double range = 1;
+
     for (size_t i = 0; i < count; i++) {
         float sample = samples[i*step];
+        min = sample < min ? sample : min;
+        max = sample > max ? sample : max;
+    }
+    range = max - min;
+    mid = (range)/2.0f;
+    //printf("%s:%d: [%.1e, %.1e, %.1e] %.ef\n", __func__, __LINE__, min, mid, max, range);
+    double irange = 1.0f/range;
+
+    for (size_t i = 0; i < count; i++) {
+        float sample = samples[i*step];
+        sample = (sample - mid)*irange;
         float x = i * xStep;
         float y = (1 - sample) * (rect.height() / 2);
 

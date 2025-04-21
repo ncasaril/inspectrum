@@ -39,6 +39,8 @@ public:
     virtual void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     virtual void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     int height() const { return _height; };
+    /** Public interface to set plot height at runtime */
+    void setPlotHeight(int height) { setHeight(height); }
 
 signals:
     void repaint();
