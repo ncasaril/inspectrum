@@ -38,6 +38,11 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t /*samplei
     auto in  = static_cast<std::complex<float>*>(input);
     auto out = static_cast<float*>(output);
     if (!cheapMode_) {
+        // The demod is stateful and the same object is reused across all
+        // getSamples() calls. Successive calls can be for non-contiguous
+        // ranges (different tiles), so prior state is garbage. Reset here
+        // and rely on SampleBuffer's lead-in samples to re-warm the filter.
+        freqdem_reset(fdem_);
         // full FIR-based demod: run filter on every sample
         for (int i = 0; i < count; i++) {
             float dem;
