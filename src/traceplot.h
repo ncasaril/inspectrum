@@ -73,12 +73,18 @@ private:
     // Last-known global min/max
     double globalMin = 0.0;
     double globalMax = 1.0;
+    // Bumps whenever globalMin/Max change; included in tile cache keys so old
+    // tiles (rendered with a stale scale) become unreachable and get replaced.
+    int minMaxEpoch = 0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
     const int defaultTileWidth = 1000;
 
+    // Kick off a background global min/max compute if the view has changed.
+    void scheduleMinMaxIfNeeded(range_t<size_t> sampleRange);
     // Request the pixmap for a given tile (width in pixels drives sample count)
     QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);
-    void plotTrace(QPainter &painter, const QRect &rect, float *samples, size_t count, int step);
+    void plotTrace(QPainter &painter, const QRect &rect, float *samples,
+                   size_t count, int step, double mid, double invRange);
 };

@@ -61,51 +61,75 @@ bool TracePlot::wheelEvent(QWheelEvent *event)
     return false;
 }
 
+void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
+{
+    bool rangeChanged = firstMinMax ||
+        sampleRange.minimum != minMaxRange.minimum ||
+        (sampleRange.maximum - sampleRange.minimum) !=
+            (minMaxRange.maximum - minMaxRange.minimum);
+    if (!rangeChanged || minMaxWatcher->isRunning())
+        return;
+    minMaxRange = sampleRange;
+    firstMinMax = false;
+    auto rangeCopy = sampleRange;
+    if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
+        auto srcPtr = srcF;
+        minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
+            size_t count = rangeCopy.maximum - rangeCopy.minimum;
+            QPair<double,double> result{
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity()};
+            auto data = srcPtr->getSamples(rangeCopy.minimum, count);
+            if (data) {
+                for (size_t i = 0; i < count; ++i) {
+                    double v = data[i];
+                    if (v < result.first)  result.first  = v;
+                    if (v > result.second) result.second = v;
+                }
+            }
+            return result;
+        }));
+    } else if (auto srcC = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
+        auto srcPtr = srcC;
+        minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
+            size_t count = rangeCopy.maximum - rangeCopy.minimum;
+            QPair<double,double> result{
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity()};
+            auto data = srcPtr->getSamples(rangeCopy.minimum, count);
+            if (data) {
+                for (size_t i = 0; i < count; ++i) {
+                    double re = data[i].real();
+                    double im = data[i].imag();
+                    if (re < result.first)  result.first  = re;
+                    if (im < result.first)  result.first  = im;
+                    if (re > result.second) result.second = re;
+                    if (im > result.second) result.second = im;
+                }
+            }
+            return result;
+        }));
+    }
+}
+
 void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
-    // For single-channel (float) derived plots, do centralized draw with global min/max
+    // Shared: kick off background global min/max whenever the range changes.
+    // Used for consistent vertical scaling across both paths and across tiles.
+    scheduleMinMaxIfNeeded(sampleRange);
+
+    // For single-channel (float) derived plots, do centralized direct draw.
     if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
         size_t start = sampleRange.minimum;
         size_t len = sampleRange.maximum - sampleRange.minimum;
         if (len == 0) return;
         auto samples = srcF->getSamples(start, len);
         if (!samples) return;
-        // Schedule background global min/max compute if needed
-        if (firstMinMax ||
-            sampleRange.minimum != minMaxRange.minimum ||
-            (sampleRange.maximum - sampleRange.minimum) !=
-                (minMaxRange.maximum - minMaxRange.minimum)) {
-            if (!minMaxWatcher->isRunning()) {
-                minMaxRange = sampleRange;
-                firstMinMax = false;
-                auto srcPtr = srcF;
-                auto rangeCopy = sampleRange;
-                auto future = QtConcurrent::run([srcPtr, rangeCopy]() {
-                    size_t start = rangeCopy.minimum;
-                    size_t count = rangeCopy.maximum - rangeCopy.minimum;
-                    QPair<double,double> result;
-                    result.first = std::numeric_limits<double>::infinity();
-                    result.second = -std::numeric_limits<double>::infinity();
-                    auto data = srcPtr->getSamples(start, count);
-                    if (data) {
-                        for (size_t i = 0; i < count; ++i) {
-                            double v = data[i];
-                            result.first = std::min(result.first, v);
-                            result.second = std::max(result.second, v);
-                        }
-                    }
-                    return result;
-                });
-                minMaxWatcher->setFuture(future);
-            }
-        }
-        // Use last-known global min/max
         double minv = globalMin;
         double maxv = globalMax;
         if (maxv <= minv) { maxv = minv + 1.0; }
         double mid = 0.5 * (minv + maxv);
         double invRange = yScale / (maxv - minv);
-        // Down-sample to at most one point per pixel
         int w = rect.width();
         int h = height();
         double xStep = double(w) / double(len);
@@ -121,7 +145,6 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
             if (first) { path.moveTo(x, y); first = false; }
             else       { path.lineTo(x, y); }
         }
-        // Ensure last sample
         if (len > 0 && (len - 1) % decim != 0) {
             size_t i = len - 1;
             double s = samples[i];
@@ -135,7 +158,8 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
         painter.drawPath(path);
         return;
     }
-    // Fallback: raw complex or multi-channel trace uses existing threaded pixmap pipeline
+    // Fallback: raw complex or multi-channel trace uses threaded pixmap pipeline.
+    // Tiles share the same globalMin/globalMax, so amplitude is consistent across edges.
     currentFrameKeys.clear();
     size_t totalLen = sampleRange.maximum - sampleRange.minimum;
     if (totalLen == 0) return;
@@ -169,7 +193,8 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
     // build tile key and mark as desired for this frame
     QString key;
     QTextStream ts(&key);
-    ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount;
+    ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount
+       << "_" << minMaxEpoch;
     currentFrameKeys.insert(key);
     // if we already have a cached pixmap, return it immediately
     if (QPixmapCache::find(key, &pixmap))
@@ -201,6 +226,13 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
     auto firstSample = sampleRange.minimum;
     auto length = sampleRange.length();
 
+    // Snapshot the shared global range so every tile renders at the same scale.
+    double minv = globalMin;
+    double maxv = globalMax;
+    if (maxv <= minv) maxv = minv + 1.0;
+    double mid = 0.5 * (minv + maxv);
+    double invRange = 1.0 / (maxv - minv);
+
     // Is it a 2-channel (complex) trace?
     if (auto src = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
         auto samples = src->getSamples(firstSample, length);
@@ -208,9 +240,9 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
             return;
 
         painter.setPen(Qt::red);
-        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get()), length, 2);
+        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get()), length, 2, mid, invRange);
         painter.setPen(Qt::blue);
-        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get())+1, length, 2);
+        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get())+1, length, 2, mid, invRange);
 
     // Otherwise is it single channel?
     } else if (auto src = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
@@ -219,7 +251,7 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
             return;
 
         painter.setPen(Qt::green);
-        plotTrace(painter, rect, samples.get(), length, 1);
+        plotTrace(painter, rect, samples.get(), length, 1, mid, invRange);
     } else {
         throw std::runtime_error("TracePlot::paintMid: Unsupported source type");
     }
@@ -235,27 +267,16 @@ void TracePlot::handleImage(QString key, QImage image)
     emit repaint();
 }
 
-void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples, size_t count, int step = 1)
+void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
+                          size_t count, int step, double mid, double invRange)
 {
     // Build a path by down-sampling to at most one point per pixel column.
+    // Scaling (mid, invRange) is supplied by the caller so all tiles share one range.
     QPainterPath path;
     const int w = rect.width();
     const int h = rect.height();
     range_t<float> xRange{0.f, float(w - 2)};
     range_t<float> yRange{0.f, float(h - 2)};
-
-    // Compute normalization range
-    double minv = 1.0e6, maxv = -1.0e6;
-    for (size_t i = 0; i < count; ++i) {
-        float s = samples[i * step];
-        if (s < minv) minv = s;
-        if (s > maxv) maxv = s;
-    }
-    double range = maxv - minv;
-    if (range <= 0.0)
-        range = 1.0;
-    double mid = (minv + maxv) * 0.5;
-    double invRange = 1.0 / range;
 
     // Compute x-step per sample
     const double xStep = double(w) / double(count);
@@ -320,9 +341,16 @@ void TracePlot::schedulePendingTiles()
 void TracePlot::onMinMaxReady()
 {
     auto p = minMaxWatcher->result();
+    bool changed = (globalMin != p.first) || (globalMax != p.second);
     globalMin = p.first;
     globalMax = p.second;
     // ensure non-zero range
     if (globalMax <= globalMin) globalMax = globalMin + 1.0;
+    if (changed) {
+        // Invalidate cached complex tiles: they were drawn against a stale range.
+        // Incrementing the epoch changes future cache keys so old entries become
+        // unreachable (and get evicted by QPixmapCache over time).
+        ++minMaxEpoch;
+    }
     emit repaint();
 }
