@@ -20,7 +20,11 @@
 #include <QPixmapCache>
 #include <QTextStream>
 #include <QtConcurrent>
+#include <QThreadPool>
 #include <QPainterPath>
+#include <cmath>
+#include <limits>
+#include <algorithm>
 #include "samplesource.h"
 #include "traceplot.h"
 
@@ -32,34 +36,124 @@ TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source
     debounceTimer->setInterval(50); // ms delay
     connect(debounceTimer, &QTimer::timeout,
             this, &TracePlot::schedulePendingTiles);
+    // vertical zoom scale
+    yScale = 1.0;
+    // initialize min/max background watcher
+    minMaxWatcher = new QFutureWatcher<QPair<double,double>>(this);
+    connect(minMaxWatcher, &QFutureWatcher<QPair<double,double>>::finished,
+            this, &TracePlot::onMinMaxReady);
+    firstMinMax = true;
+}
+
+bool TracePlot::wheelEvent(QWheelEvent *event)
+{
+    // Vertical zoom only for single-channel (float) derived plots
+    if (dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
+        int delta = event->angleDelta().y();
+        // Scale factor: ~1.1x per wheel step
+        double factor = std::pow(1.1, delta / 120.0);
+        yScale *= factor;
+        // Clamp scale
+        yScale = std::max(0.1, std::min(yScale, 10.0));
+        emit repaint();
+        return true;
+    }
+    return false;
 }
 
 void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
-    // start a fresh set of needed tiles for this paint pass
+    // For single-channel (float) derived plots, do centralized draw with global min/max
+    if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
+        size_t start = sampleRange.minimum;
+        size_t len = sampleRange.maximum - sampleRange.minimum;
+        if (len == 0) return;
+        auto samples = srcF->getSamples(start, len);
+        if (!samples) return;
+        // Schedule background global min/max compute if needed
+        if (firstMinMax ||
+            sampleRange.minimum != minMaxRange.minimum ||
+            (sampleRange.maximum - sampleRange.minimum) !=
+                (minMaxRange.maximum - minMaxRange.minimum)) {
+            if (!minMaxWatcher->isRunning()) {
+                minMaxRange = sampleRange;
+                firstMinMax = false;
+                auto srcPtr = srcF;
+                auto rangeCopy = sampleRange;
+                auto future = QtConcurrent::run([srcPtr, rangeCopy]() {
+                    size_t start = rangeCopy.minimum;
+                    size_t count = rangeCopy.maximum - rangeCopy.minimum;
+                    QPair<double,double> result;
+                    result.first = std::numeric_limits<double>::infinity();
+                    result.second = -std::numeric_limits<double>::infinity();
+                    auto data = srcPtr->getSamples(start, count);
+                    if (data) {
+                        for (size_t i = 0; i < count; ++i) {
+                            double v = data[i];
+                            result.first = std::min(result.first, v);
+                            result.second = std::max(result.second, v);
+                        }
+                    }
+                    return result;
+                });
+                minMaxWatcher->setFuture(future);
+            }
+        }
+        // Use last-known global min/max
+        double minv = globalMin;
+        double maxv = globalMax;
+        if (maxv <= minv) { maxv = minv + 1.0; }
+        double mid = 0.5 * (minv + maxv);
+        double invRange = yScale / (maxv - minv);
+        // Down-sample to at most one point per pixel
+        int w = rect.width();
+        int h = height();
+        double xStep = double(w) / double(len);
+        size_t decim = (len > size_t(w)) ? (len + w - 1) / w : 1;
+        QPainterPath path;
+        bool first = true;
+        for (size_t i = 0; i < len; i += decim) {
+            double s = samples[i];
+            double norm = (s - mid) * invRange;
+            norm = clamp(norm, -1.0, 1.0);
+            double x = rect.x() + i * xStep;
+            double y = rect.y() + (1.0 - norm) * (h * 0.5);
+            if (first) { path.moveTo(x, y); first = false; }
+            else       { path.lineTo(x, y); }
+        }
+        // Ensure last sample
+        if (len > 0 && (len - 1) % decim != 0) {
+            size_t i = len - 1;
+            double s = samples[i];
+            double norm = (s - mid) * invRange;
+            norm = clamp(norm, -1.0, 1.0);
+            double x = rect.x() + w - 1;
+            double y = rect.y() + (1.0 - norm) * (h * 0.5);
+            path.lineTo(x, y);
+        }
+        painter.setPen(Qt::green);
+        painter.drawPath(path);
+        return;
+    }
+    // Fallback: raw complex or multi-channel trace uses existing threaded pixmap pipeline
     currentFrameKeys.clear();
-    if (sampleRange.length() == 0) return;
-
-    int samplesPerColumn = std::max(1UL, sampleRange.length() / rect.width());
-    // dynamic tile size to match thread count
+    size_t totalLen = sampleRange.maximum - sampleRange.minimum;
+    if (totalLen == 0) return;
+    int samplesPerColumn = std::max(1UL, totalLen / rect.width());
     int threads = QThreadPool::globalInstance()->maxThreadCount();
     if (threads < 1) threads = 1;
     int tilePx = rect.width() / threads;
     if (tilePx < 1) tilePx = 1;
     int samplesPerTile = tilePx * samplesPerColumn;
     size_t tileID = sampleRange.minimum / samplesPerTile;
-    size_t tileOffset = sampleRange.minimum % samplesPerTile; // Number of samples to skip from first image tile
-    int xOffset = tileOffset / samplesPerColumn; // Number of columns to skip from first image tile
-
-    // Paint first (possibly partial) tile
+    size_t tileOffset = sampleRange.minimum % samplesPerTile;
+    int xOffset = tileOffset / samplesPerColumn;
     // Paint first (possibly partial) tile
     painter.drawPixmap(
         QRect(rect.x(), rect.y(), tilePx - xOffset, height()),
         getTile(tileID++, samplesPerTile, tilePx),
         QRect(xOffset, 0, tilePx - xOffset, height())
     );
-
-    // Paint remaining tiles
     // Paint remaining tiles
     for (int x = tilePx - xOffset; x < rect.right(); x += tilePx) {
         painter.drawPixmap(
@@ -220,4 +314,15 @@ void TracePlot::schedulePendingTiles()
                          key, QRect(0, 0, tilePx, height()), sampleRange);
         tasks.insert(key);
     }
+}
+
+// Slot: global min/max computed in background
+void TracePlot::onMinMaxReady()
+{
+    auto p = minMaxWatcher->result();
+    globalMin = p.first;
+    globalMax = p.second;
+    // ensure non-zero range
+    if (globalMax <= globalMin) globalMax = globalMin + 1.0;
+    emit repaint();
 }

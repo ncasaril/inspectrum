@@ -25,6 +25,9 @@
 #include <QTimer>
 #include <QHash>
 #include <QPair>
+#include <QFutureWatcher>
+#include <QtConcurrent>
+#include <QWheelEvent>
 
 class TracePlot : public Plot
 {
@@ -35,6 +38,8 @@ public:
 
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
+    // Handle vertical zoom via mouse wheel
+    bool wheelEvent(QWheelEvent *event) override;
 
 signals:
     void imageReady(QString key, QImage image);
@@ -45,6 +50,8 @@ public slots:
 private slots:
     // Debounce timer expired: schedule all pending tile-draw tasks
     void schedulePendingTiles();
+    // Background min/max for float plots is ready
+    void onMinMaxReady();
 
 private:
     // In-process tile keys
@@ -56,6 +63,16 @@ private:
     QSet<QString> currentFrameKeys;
     // Debounce timer for batching tile requests
     QTimer *debounceTimer;
+    // Scale factor for vertical zoom
+    double yScale = 1.0;
+    // Background worker for global min/max
+    QFutureWatcher<QPair<double,double>> *minMaxWatcher;
+    // Range for which min/max is computed
+    range_t<size_t> minMaxRange;
+    bool firstMinMax;
+    // Last-known global min/max
+    double globalMin = 0.0;
+    double globalMax = 1.0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
     const int defaultTileWidth = 1000;

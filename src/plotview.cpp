@@ -26,6 +26,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDebug>
+#include <QWheelEvent>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -288,16 +289,14 @@ void PlotView::enableCursors(bool enabled)
 bool PlotView::viewportEvent(QEvent *event) {
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
-        QWheelEvent *wheelEvent = (QWheelEvent*)event;
+        QWheelEvent *wheelEvent = static_cast<QWheelEvent*>(event);
+        // Ctrl+wheel: horizontal zoom
         if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
             bool canZoomIn = zoomLevel < fftSize;
             bool canZoomOut = zoomLevel > -64;
             int delta = wheelEvent->angleDelta().y();
             if ((delta > 0 && canZoomIn) || (delta < 0 && canZoomOut)) {
                 scrollZoomStepsAccumulated += delta;
-
-                // `updateViewRange()` keeps the center sample in the same place after zoom. Apply
-                // a scroll adjustment to keep the sample under the mouse cursor in the same place instead.
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
                 zoomPos = wheelEvent->position().x();
 #else
@@ -313,6 +312,24 @@ bool PlotView::viewportEvent(QEvent *event) {
                 }
             }
             return true;
+        }
+        // No modifier: forward to plots for vertical zoom
+        {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+            int viewY = int(wheelEvent->position().y());
+#else
+            int viewY = wheelEvent->pos().y();
+#endif
+            int plotY = -verticalScrollBar()->value();
+            for (auto&& plot : plots) {
+                int ph = plot->height();
+                if (viewY >= plotY && viewY < plotY + ph) {
+                    if (plot->wheelEvent(wheelEvent))
+                        return true;
+                    break;
+                }
+                plotY += ph;
+            }
         }
     }
 

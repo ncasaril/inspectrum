@@ -20,6 +20,7 @@
 #pragma once
 
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QObject>
 #include <QPainter>
 #include "abstractsamplesource.h"
@@ -34,6 +35,8 @@ public:
     ~Plot();
     void invalidateEvent() override;
     virtual bool mouseEvent(QEvent::Type type, QMouseEvent event);
+    /** Handle wheel events (vertical zoom) */
+    virtual bool wheelEvent(QWheelEvent *event) { Q_UNUSED(event); return false; }
     virtual std::shared_ptr<AbstractSampleSource> output();
     virtual void paintBack(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     virtual void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
