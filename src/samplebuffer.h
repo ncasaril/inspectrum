@@ -47,4 +47,9 @@ public:
     float relativeBandwidth() {
         return src->relativeBandwidth();
     }
+    // Number of pre-history samples getSamples() fetches and discards so
+    // subclasses can warm their internal filters before producing real output.
+    // Override if a transform needs more than the default 256-sample lead-in
+    // (e.g., a long FIR whose impulse response exceeds it).
+    virtual size_t historySize() { return 256; }
 };

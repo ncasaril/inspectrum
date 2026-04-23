@@ -70,3 +70,8 @@ void TunerTransform::setRelativeBandwith(float bandwidth)
     this->bandwidth = bandwidth;
 }
 
+size_t TunerTransform::historySize()
+{
+    return std::max(static_cast<size_t>(256), taps.size());
+}
+
