@@ -61,6 +61,65 @@ bool TracePlot::wheelEvent(QWheelEvent *event)
     return false;
 }
 
+void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> /*sampleRange*/)
+{
+    // Draw a left-margin y-axis (min / mid / max) and a dashed zero line when
+    // zero is within the currently-displayed range. Values come from the shared
+    // globalMin/globalMax computed in scheduleMinMaxIfNeeded(); the float path
+    // additionally compresses/expands by yScale, so reflect that here.
+    double minv = globalMin;
+    double maxv = globalMax;
+    if (maxv <= minv) maxv = minv + 1.0;
+    double mid = 0.5 * (minv + maxv);
+    double axisMin = minv;
+    double axisMax = maxv;
+    if (dynamic_cast<SampleSource<float>*>(sampleSource.get()) && yScale > 0.0) {
+        double halfRange = 0.5 * (maxv - minv) / yScale;
+        axisMin = mid - halfRange;
+        axisMax = mid + halfRange;
+    }
+    double visibleSpan = axisMax - axisMin;
+    if (visibleSpan <= 0.0) visibleSpan = 1.0;
+
+    painter.save();
+
+    // Dashed zero line when 0 is visible.
+    if (axisMin < 0.0 && axisMax > 0.0) {
+        double normZero = -2.0 * mid / visibleSpan;
+        int zeroY = rect.y() + static_cast<int>((1.0 - normZero) * (rect.height() * 0.5));
+        QPen zeroPen(QColor(200, 200, 200, 110), 1, Qt::DashLine);
+        painter.setPen(zeroPen);
+        painter.drawLine(rect.left(), zeroY, rect.right(), zeroY);
+    }
+
+    // Left-margin scale with a translucent backdrop so it reads over the trace.
+    QFont f = painter.font();
+    f.setPointSizeF(8.0);
+    painter.setFont(f);
+    QFontMetrics fm(f);
+
+    auto fmt = [](double v) -> QString {
+        if (std::abs(v) < 1e-12) return QStringLiteral("0");
+        return QString::number(v, 'g', 3);
+    };
+    QString sMax = fmt(axisMax);
+    QString sMid = fmt(mid);
+    QString sMin = fmt(axisMin);
+
+    const int textMargin = 4;
+    int maxW = std::max({fm.width(sMax), fm.width(sMid), fm.width(sMin)});
+    int bgW = maxW + textMargin * 2;
+    painter.fillRect(rect.left(), rect.top(), bgW, rect.height(), QColor(0, 0, 0, 140));
+
+    painter.setPen(QColor(220, 220, 220));
+    int x = rect.left() + textMargin;
+    painter.drawText(x, rect.top() + fm.ascent() + 1, sMax);
+    painter.drawText(x, rect.top() + rect.height() / 2 + fm.ascent() / 2 - 1, sMid);
+    painter.drawText(x, rect.bottom() - fm.descent() - 1, sMin);
+
+    painter.restore();
+}
+
 void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
 {
     bool rangeChanged = firstMinMax ||

@@ -37,6 +37,7 @@ public:
     TracePlot(std::shared_ptr<AbstractSampleSource> source);
 
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
+    void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
     // Handle vertical zoom via mouse wheel
     bool wheelEvent(QWheelEvent *event) override;
