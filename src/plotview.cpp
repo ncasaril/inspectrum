@@ -221,6 +221,26 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     QMenu *plotsMenu = menu.addMenu("Add derived plot");
     auto src = selectedPlot->output();
     auto compatiblePlots = as_range(Plots::plots.equal_range(src->sampleType()));
+    // Shortcut: add sample/amplitude/frequency as a single stacked set.
+    // Only offered when the source is complex<float> (the combo only makes
+    // sense for that sample type — the three creators all assume it).
+    if (src->sampleType() == typeid(std::complex<float>)) {
+        auto trioAction = new QAction(QStringLiteral("Add IQ + AM + FM"), plotsMenu);
+        connect(
+            trioAction, &QAction::triggered,
+            this, [=]() {
+                // Order: sample (IQ) first, amplitude (AM) second, frequency (FM) last
+                addPlot(Plots::samplePlot(src));
+                addPlot(Plots::amplitudePlot(src));
+                addPlot(Plots::frequencyPlot(src));
+                this->zoomSample = clickSample;
+                this->zoomPos = centerX;
+                this->updateView(true);
+            }
+        );
+        plotsMenu->addAction(trioAction);
+        plotsMenu->addSeparator();
+    }
     for (auto p : compatiblePlots) {
         auto plotInfo = p.second;
         auto action = new QAction(QString("Add %1").arg(plotInfo.name), plotsMenu);

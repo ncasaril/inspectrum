@@ -20,6 +20,7 @@
 #include "frequencydemod.h"
 #include <liquid/liquid.h>
 #include <QMutexLocker>
+#include <cmath>
 #include <complex>
 #include <algorithm>
 #include <vector>
@@ -169,4 +170,13 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
 
     applyPostLpf(out, count);
     applyPostDecimation(out, count, sampleid);
+
+    // Scrub non-finite values: freqdem's cold-start near sampleid=0 can
+    // produce NaN/Inf when the tuner's fresh FIR feeds it near-zero-magnitude
+    // samples, and NaN can then propagate through the rest of the chunk.
+    // Downstream (min/max scan, painter path) are finite-only, so replace
+    // any junk with zero.
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(out[i])) out[i] = 0.0f;
+    }
 }
