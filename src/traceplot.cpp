@@ -130,6 +130,53 @@ void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> /*sam
     painter.restore();
 }
 
+static QPair<double,double> scanFloatRange(SampleSource<float> *src, range_t<size_t> range)
+{
+    size_t count = range.maximum - range.minimum;
+    QPair<double,double> result{
+        std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()};
+    auto data = src->getSamples(range.minimum, count);
+    if (data) {
+        for (size_t i = 0; i < count; ++i) {
+            double v = data[i];
+            if (v < result.first)  result.first  = v;
+            if (v > result.second) result.second = v;
+        }
+    }
+    return result;
+}
+
+static QPair<double,double> scanComplexRange(SampleSource<std::complex<float>> *src, range_t<size_t> range)
+{
+    size_t count = range.maximum - range.minimum;
+    QPair<double,double> result{
+        std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()};
+    auto data = src->getSamples(range.minimum, count);
+    if (data) {
+        for (size_t i = 0; i < count; ++i) {
+            double re = data[i].real();
+            double im = data[i].imag();
+            if (re < result.first)  result.first  = re;
+            if (im < result.first)  result.first  = im;
+            if (re > result.second) result.second = re;
+            if (im > result.second) result.second = im;
+        }
+    }
+    return result;
+}
+
+void TracePlot::applyMinMax(QPair<double,double> result)
+{
+    if (!std::isfinite(result.first) || !std::isfinite(result.second)) return;
+    bool changed = (globalMin != result.first) || (globalMax != result.second);
+    globalMin = result.first;
+    globalMax = result.second;
+    if (globalMax <= globalMin) globalMax = globalMin + 1.0;
+    if (changed) ++minMaxEpoch;
+}
+
 void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
 {
     bool rangeChanged = firstMinMax ||
@@ -138,45 +185,34 @@ void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
             (minMaxRange.maximum - minMaxRange.minimum);
     if (!rangeChanged || minMaxWatcher->isRunning())
         return;
+    const bool wasFirst = firstMinMax;
     minMaxRange = sampleRange;
     firstMinMax = false;
+
+    // On the very first paint of a plot, compute min/max synchronously so the
+    // display has valid axis bounds on frame 1. The alternative — default
+    // (0, 1) bounds while the async scan runs — clamps signals like FM (±1e6)
+    // to the plot edges, making the plot look empty. For subsequent paints,
+    // keep the scan async to stay responsive during scrolling.
+    if (wasFirst) {
+        if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
+            applyMinMax(scanFloatRange(srcF, sampleRange));
+        } else if (auto srcC = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
+            applyMinMax(scanComplexRange(srcC, sampleRange));
+        }
+        return;
+    }
+
     auto rangeCopy = sampleRange;
     if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
         auto srcPtr = srcF;
         minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
-            size_t count = rangeCopy.maximum - rangeCopy.minimum;
-            QPair<double,double> result{
-                std::numeric_limits<double>::infinity(),
-                -std::numeric_limits<double>::infinity()};
-            auto data = srcPtr->getSamples(rangeCopy.minimum, count);
-            if (data) {
-                for (size_t i = 0; i < count; ++i) {
-                    double v = data[i];
-                    if (v < result.first)  result.first  = v;
-                    if (v > result.second) result.second = v;
-                }
-            }
-            return result;
+            return scanFloatRange(srcPtr, rangeCopy);
         }));
     } else if (auto srcC = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
         auto srcPtr = srcC;
         minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
-            size_t count = rangeCopy.maximum - rangeCopy.minimum;
-            QPair<double,double> result{
-                std::numeric_limits<double>::infinity(),
-                -std::numeric_limits<double>::infinity()};
-            auto data = srcPtr->getSamples(rangeCopy.minimum, count);
-            if (data) {
-                for (size_t i = 0; i < count; ++i) {
-                    double re = data[i].real();
-                    double im = data[i].imag();
-                    if (re < result.first)  result.first  = re;
-                    if (im < result.first)  result.first  = im;
-                    if (re > result.second) result.second = re;
-                    if (im > result.second) result.second = im;
-                }
-            }
-            return result;
+            return scanComplexRange(srcPtr, rangeCopy);
         }));
     }
 }
@@ -409,17 +445,6 @@ void TracePlot::schedulePendingTiles()
 // Slot: global min/max computed in background
 void TracePlot::onMinMaxReady()
 {
-    auto p = minMaxWatcher->result();
-    bool changed = (globalMin != p.first) || (globalMax != p.second);
-    globalMin = p.first;
-    globalMax = p.second;
-    // ensure non-zero range
-    if (globalMax <= globalMin) globalMax = globalMin + 1.0;
-    if (changed) {
-        // Invalidate cached complex tiles: they were drawn against a stale range.
-        // Incrementing the epoch changes future cache keys so old entries become
-        // unreachable (and get evicted by QPixmapCache over time).
-        ++minMaxEpoch;
-    }
+    applyMinMax(minMaxWatcher->result());
     emit repaint();
 }

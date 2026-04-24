@@ -87,6 +87,8 @@ private:
 
     // Kick off a background global min/max compute if the view has changed.
     void scheduleMinMaxIfNeeded(range_t<size_t> sampleRange);
+    // Update globalMin/Max and bump the epoch on change; skips non-finite inputs.
+    void applyMinMax(QPair<double,double> result);
     // Request the pixmap for a given tile (width in pixels drives sample count)
     QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);
