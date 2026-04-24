@@ -140,6 +140,10 @@ static QPair<double,double> scanFloatRange(SampleSource<float> *src, range_t<siz
     if (data) {
         for (size_t i = 0; i < count; ++i) {
             double v = data[i];
+            // Skip NaN/Inf — freqdem's fresh-state output near t=0 can emit
+            // non-finite samples which would poison min/max comparisons
+            // (NaN < x is always false).
+            if (!std::isfinite(v)) continue;
             if (v < result.first)  result.first  = v;
             if (v > result.second) result.second = v;
         }
@@ -158,10 +162,14 @@ static QPair<double,double> scanComplexRange(SampleSource<std::complex<float>> *
         for (size_t i = 0; i < count; ++i) {
             double re = data[i].real();
             double im = data[i].imag();
-            if (re < result.first)  result.first  = re;
-            if (im < result.first)  result.first  = im;
-            if (re > result.second) result.second = re;
-            if (im > result.second) result.second = im;
+            if (std::isfinite(re)) {
+                if (re < result.first)  result.first  = re;
+                if (re > result.second) result.second = re;
+            }
+            if (std::isfinite(im)) {
+                if (im < result.first)  result.first  = im;
+                if (im > result.second) result.second = im;
+            }
         }
     }
     return result;
@@ -241,23 +249,20 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
         size_t decim = (len > size_t(w)) ? (len + w - 1) / w : 1;
         QPainterPath path;
         bool first = true;
-        for (size_t i = 0; i < len; i += decim) {
+        auto addPoint = [&](size_t i, double xCoord) {
             double s = samples[i];
+            if (!std::isfinite(s)) return;
             double norm = (s - mid) * invRange;
             norm = clamp(norm, -1.0, 1.0);
-            double x = rect.x() + i * xStep;
             double y = rect.y() + (1.0 - norm) * (h * 0.5);
-            if (first) { path.moveTo(x, y); first = false; }
-            else       { path.lineTo(x, y); }
+            if (first) { path.moveTo(xCoord, y); first = false; }
+            else       { path.lineTo(xCoord, y); }
+        };
+        for (size_t i = 0; i < len; i += decim) {
+            addPoint(i, rect.x() + i * xStep);
         }
         if (len > 0 && (len - 1) % decim != 0) {
-            size_t i = len - 1;
-            double s = samples[i];
-            double norm = (s - mid) * invRange;
-            norm = clamp(norm, -1.0, 1.0);
-            double x = rect.x() + w - 1;
-            double y = rect.y() + (1.0 - norm) * (h * 0.5);
-            path.lineTo(x, y);
+            addPoint(len - 1, rect.x() + w - 1);
         }
         painter.setPen(Qt::green);
         painter.drawPath(path);
