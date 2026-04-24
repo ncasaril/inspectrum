@@ -38,11 +38,18 @@ private:
     size_t sampleCount = 0;
     double sampleRate = 0.0;
     uchar *mmapData = nullptr;
+    // Byte offset of the first IQ sample within the mmap. Non-zero for
+    // container formats like Rohde & Schwarz .iq.tar where the raw data
+    // sits after a 512-byte tar header inside the archive.
+    size_t dataOffset = 0;
     std::unique_ptr<SampleAdapter> sampleAdapter;
     std::string _fmt;
     bool _realSignal = false;
 
     QJsonObject readMetaData(const QString &filename);
+    // Populate sampleAdapter / sampleRate / sampleCount / frequency /
+    // dataOffset from a memory-mapped R&S iq.tar archive. Throws on error.
+    void openIqTar(const uchar *data, qint64 size);
 
 public:
     InputSource();
