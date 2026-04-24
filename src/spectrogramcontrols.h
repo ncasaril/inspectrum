@@ -46,6 +46,10 @@ signals:
      * Requested number of threads to use for tile rendering.
      */
     void threadsChanged(int threads);
+    // Post-demod LPF cutoff (Hz) applied to all frequency plots. 0 = disabled.
+    void fmLpfChanged(double hz);
+    // Block-averaging decimation factor applied after the FM demod. 1 = disabled.
+    void fmDecimChanged(int n);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -92,4 +96,8 @@ public:
      * Spinbox to select number of threads for concurrent tasks.
      */
     QSpinBox   *threadCountSpinBox;
+    // FM post-demod LPF cutoff in Hz (0 disables)
+    QLineEdit  *fmLpfLineEdit;
+    // FM post-demod block-average decimation factor (1 disables)
+    QSpinBox   *fmDecimSpinBox;
 };

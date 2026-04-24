@@ -71,6 +71,10 @@ public slots:
      * Set maximum threads for background tile rendering.
      */
     void setMaxThreads(int threads);
+    // Cutoff (Hz) for the post-demod LPF on every FM plot. 0 disables.
+    void setFmLpfCutoff(double hz);
+    // Block-average decimation factor on every FM plot. 1 disables.
+    void setFmDecimation(int n);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -118,4 +122,7 @@ private:
     int sampleToColumn(size_t sample);
     size_t columnToSample(int col);
     int derivedPlotHeight;
+    // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
+    double fmLpfCutoffHz = 0.0;
+    int    fmDecim = 1;
 };

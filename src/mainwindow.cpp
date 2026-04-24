@@ -61,6 +61,9 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fastDemodChanged, plots, &PlotView::enableFastDemod);
     // allow user to control number of threads in the Qt thread pool
     connect(dock, &SpectrogramControls::threadsChanged, plots, &PlotView::setMaxThreads);
+    // FM post-demod LPF cutoff and block-average decimation
+    connect(dock, &SpectrogramControls::fmLpfChanged, plots, &PlotView::setFmLpfCutoff);
+    connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

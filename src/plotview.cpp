@@ -87,12 +87,49 @@ void PlotView::setMaxThreads(int threads)
     // configure the global QThreadPool for QtConcurrent::run
     QThreadPool::globalInstance()->setMaxThreadCount(threads);
 }
+
+void PlotView::setFmLpfCutoff(double hz)
+{
+    fmLpfCutoffHz = hz;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostLpfCutoff(hz);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
+void PlotView::setFmDecimation(int n)
+{
+    if (n < 1) n = 1;
+    fmDecim = n;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostDecimation(n);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
     // If this is a derived plot (not the main spectrogram), set its height
     if (plots.size() > 1) {
         plot->setPlotHeight(derivedPlotHeight);
+    }
+    // Propagate the currently-configured FM settings to any newly added FM plot.
+    if (auto tp = dynamic_cast<TracePlot*>(plot)) {
+        if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            fd->setPostLpfCutoff(fmLpfCutoffHz);
+            fd->setPostDecimation(fmDecim);
+        }
     }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }

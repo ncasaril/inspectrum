@@ -28,14 +28,30 @@ public:
     FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src);
     virtual ~FrequencyDemod();
     void work(void *input, void *output, int count, size_t sampleid) override;
+    size_t historySize() override;
+
+    // Toggle fast-path demodulation (instantaneous phase diff).
+    void setCheapDemod(bool enabled) { cheapMode_ = enabled; }
+    // Post-demod LPF cutoff in Hz. 0 disables the filter.
+    void setPostLpfCutoff(double hz);
+    // Block-averaging decimation on the post-demod stream. N=1 disables.
+    void setPostDecimation(int n);
+
 private:
     // Liquid-DSP frequency demodulator object
     freqdem      fdem_;
-    // if true, use fast instantaneous-frequency demod instead of full FIR
+    // Fast instantaneous-frequency demod (phase difference) instead of full FIR
     bool         cheapMode_ = false;
-public:
-    /**
-     * Toggle fast-path demodulation mode (instantaneous phase diff).
-     */
-    void setCheapDemod(bool enabled) { cheapMode_ = enabled; }
+    // Post-demod LPF (built lazily when the upstream sample rate is known)
+    double       postLpfCutoffHz_ = 0.0;
+    firfilt_rrrf postLpf_ = nullptr;
+    size_t       postLpfLen_ = 0;
+    // Cached sample rate used to build postLpf_; rebuilds when it changes.
+    double       postLpfBuiltAtRate_ = 0.0;
+    // Post-demod block-average decimation. 1 = disabled.
+    int          postDecim_ = 1;
+
+    void rebuildPostLpf();
+    void applyPostLpf(float *out, int count);
+    void applyPostDecimation(float *out, int count, size_t sampleid);
 };

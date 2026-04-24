@@ -128,6 +128,24 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("Threads:")), threadCountSpinBox);
     connect(threadCountSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::threadsChanged);
+    // FM post-demod LPF cutoff (Hz). 0 = disabled.
+    fmLpfLineEdit = new QLineEdit(widget);
+    auto fmLpfValidator = new QDoubleValidator(0.0, 1e9, 3, this);
+    fmLpfLineEdit->setValidator(fmLpfValidator);
+    fmLpfLineEdit->setText("0");
+    layout->addRow(new QLabel(tr("FM LPF cutoff (Hz):")), fmLpfLineEdit);
+    connect(fmLpfLineEdit, &QLineEdit::textChanged, this, [this](const QString &t) {
+        bool ok;
+        double hz = t.toDouble(&ok);
+        if (ok) emit fmLpfChanged(hz);
+    });
+    // FM post-demod block-average decimation factor. 1 = disabled.
+    fmDecimSpinBox = new QSpinBox(widget);
+    fmDecimSpinBox->setRange(1, 4096);
+    fmDecimSpinBox->setValue(1);
+    layout->addRow(new QLabel(tr("FM decim (N):")), fmDecimSpinBox);
+    connect(fmDecimSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::fmDecimChanged);
 
     widget->setLayout(layout);
     setWidget(widget);
