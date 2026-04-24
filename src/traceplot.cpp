@@ -45,6 +45,16 @@ TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source
     firstMinMax = true;
 }
 
+void TracePlot::invalidateEvent()
+{
+    // Force a fresh min/max scan next paint and unreach cached tiles. We keep
+    // the previous globalMin/Max around until the new scan completes so the
+    // first post-invalidate frame is at least drawable rather than blank.
+    firstMinMax = true;
+    ++minMaxEpoch;
+    emit repaint();
+}
+
 bool TracePlot::wheelEvent(QWheelEvent *event)
 {
     // Vertical zoom only for single-channel (float) derived plots

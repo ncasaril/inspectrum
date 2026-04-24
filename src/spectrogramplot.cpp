@@ -459,7 +459,11 @@ void SpectrogramPlot::tunerMoved()
     tunerTransform->setTaps(getTunerTaps());
     tunerTransform->setRelativeBandwith(tuner.deviation() * 2.0 / height());
 
-    // TODO: for invalidating traceplot cache, this shouldn't really go here
+    // Propagate the change through the subscriber chain. Downstream demods
+    // invalidate their plots, which reschedule the min/max scan and bump
+    // tile cache epochs so stale-scaled output isn't shown until the user
+    // happens to scroll.
+    tunerTransform->notifyChanged();
     QPixmapCache::clear();
 
     emit repaint();

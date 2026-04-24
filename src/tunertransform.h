@@ -36,6 +36,10 @@ public:
     void setTaps(std::vector<float> taps);
     void setRelativeBandwith(float bandwidth);
     float relativeBandwidth() override;
+    // Notify subscribers (downstream demods, which cascade to their plots)
+    // that the mix frequency / filter / bandwidth have changed and any
+    // cached data is stale. Called once after a batch of setters.
+    void notifyChanged() { invalidate(); }
     // The FIR is rebuilt from zero state each call, so the lead-in must cover
     // at least the tap count or the first output samples will be attenuated
     // filter transient — visible as noise in downstream demods.

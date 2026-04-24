@@ -38,6 +38,10 @@ public:
 
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
     void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
+    // When upstream data changes (tuner moved, LPF retuned, etc.) invalidate
+    // our cached min/max so the next paint reschedules the background scan,
+    // and bump the tile-cache epoch so stale complex-path tiles aren't reused.
+    void invalidateEvent() override;
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
     // Handle vertical zoom via mouse wheel
     bool wheelEvent(QWheelEvent *event) override;
