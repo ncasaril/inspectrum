@@ -134,9 +134,11 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     fmLpfLineEdit->setValidator(fmLpfValidator);
     fmLpfLineEdit->setText("0");
     layout->addRow(new QLabel(tr("FM LPF cutoff (Hz):")), fmLpfLineEdit);
-    connect(fmLpfLineEdit, &QLineEdit::textChanged, this, [this](const QString &t) {
+    // Fire only on editingFinished (Enter pressed or focus leaves the field)
+    // so we don't rebuild the Kaiser LPF on every keystroke.
+    connect(fmLpfLineEdit, &QLineEdit::editingFinished, this, [this]() {
         bool ok;
-        double hz = t.toDouble(&ok);
+        double hz = fmLpfLineEdit->text().toDouble(&ok);
         if (ok) emit fmLpfChanged(hz);
     });
     // FM post-demod block-average decimation factor. 1 = disabled.
