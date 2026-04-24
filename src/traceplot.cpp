@@ -316,12 +316,11 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
 
 void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange)
 {
-    // if this tile is no longer part of the current view, abort early
-    if (!currentFrameKeys.contains(key)) {
-        tasks.remove(key);
-        return;
-    }
-    // render into an offscreen image
+    // NOTE: runs on a QtConcurrent worker thread. Do not touch currentFrameKeys
+    // or tasks from here — they live on the GUI thread and QSet isn't
+    // thread-safe. Any early-exit / bookkeeping based on those sets happens in
+    // handleImage() on the GUI thread (at the cost of a potentially wasted
+    // render for tiles that have scrolled out of view).
     QImage image(rect.size(), QImage::Format_ARGB32);
     image.fill(Qt::transparent);
 
@@ -341,34 +340,40 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
     // Is it a 2-channel (complex) trace?
     if (auto src = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
         auto samples = src->getSamples(firstSample, length);
-        if (samples == nullptr)
-            return;
-
-        painter.setPen(Qt::red);
-        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get()), length, 2, mid, invRange);
-        painter.setPen(Qt::blue);
-        plotTrace(painter, rect, reinterpret_cast<float*>(samples.get())+1, length, 2, mid, invRange);
+        if (samples) {
+            painter.setPen(Qt::red);
+            plotTrace(painter, rect, reinterpret_cast<float*>(samples.get()), length, 2, mid, invRange);
+            painter.setPen(Qt::blue);
+            plotTrace(painter, rect, reinterpret_cast<float*>(samples.get())+1, length, 2, mid, invRange);
+        }
 
     // Otherwise is it single channel?
     } else if (auto src = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
         auto samples = src->getSamples(firstSample, length);
-        if (samples == nullptr)
-            return;
-
-        painter.setPen(Qt::green);
-        plotTrace(painter, rect, samples.get(), length, 1, mid, invRange);
+        if (samples) {
+            painter.setPen(Qt::green);
+            plotTrace(painter, rect, samples.get(), length, 1, mid, invRange);
+        }
     } else {
-        throw std::runtime_error("TracePlot::paintMid: Unsupported source type");
+        throw std::runtime_error("TracePlot::drawTile: Unsupported source type");
     }
 
+    // Always emit — handleImage needs to clear the in-flight bookkeeping even
+    // when getSamples returned null (otherwise the tile stays "in flight"
+    // indefinitely and never re-schedules).
     emit imageReady(key, image);
 }
 
 void TracePlot::handleImage(QString key, QImage image)
 {
+    // Worker finished; clear the in-flight bookkeeping on the GUI thread.
+    tasks.remove(key);
+    // If this tile is no longer desired (viewport moved past it while the
+    // worker was running), drop it without caching.
+    if (!currentFrameKeys.contains(key))
+        return;
     auto pixmap = QPixmap::fromImage(image);
     QPixmapCache::insert(key, pixmap);
-    tasks.remove(key);
     emit repaint();
 }
 
