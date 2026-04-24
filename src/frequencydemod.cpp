@@ -19,6 +19,7 @@
 
 #include "frequencydemod.h"
 #include <liquid/liquid.h>
+#include <QMutexLocker>
 #include <complex>
 #include <algorithm>
 #include <vector>
@@ -37,9 +38,7 @@ FrequencyDemod::~FrequencyDemod()
 
 size_t FrequencyDemod::historySize()
 {
-    // The post-demod LPF is run across (history + length) samples and reset at
-    // the start of each work() call, so the lead-in must cover the LPF taps or
-    // the first output samples are filter transient.
+    QMutexLocker ml(&mutex);
     size_t base = SampleBuffer::historySize();
     if (postLpfLen_ > base) base = postLpfLen_;
     return base;
@@ -48,17 +47,23 @@ size_t FrequencyDemod::historySize()
 void FrequencyDemod::setPostLpfCutoff(double hz)
 {
     if (hz < 0.0) hz = 0.0;
-    if (hz == postLpfCutoffHz_) return;
-    postLpfCutoffHz_ = hz;
-    rebuildPostLpf();
+    {
+        QMutexLocker ml(&mutex);
+        if (hz == postLpfCutoffHz_) return;
+        postLpfCutoffHz_ = hz;
+        rebuildPostLpf(); // assumes mutex held
+    }
     invalidate();
 }
 
 void FrequencyDemod::setPostDecimation(int n)
 {
     if (n < 1) n = 1;
-    if (n == postDecim_) return;
-    postDecim_ = n;
+    {
+        QMutexLocker ml(&mutex);
+        if (n == postDecim_) return;
+        postDecim_ = n;
+    }
     invalidate();
 }
 

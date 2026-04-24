@@ -19,6 +19,7 @@
 
 #include "tunertransform.h"
 #include <liquid/liquid.h>
+#include <QMutexLocker>
 #include "util.h"
 
 TunerTransform::TunerTransform(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src), frequency(0), bandwidth(1.), taps{1.0f}
@@ -53,12 +54,17 @@ void TunerTransform::work(void *input, void *output, int count, size_t sampleid)
 
 void TunerTransform::setFrequency(float frequency)
 {
+    // Serialize with work() — a worker thread may be reading frequency now.
+    QMutexLocker ml(&mutex);
     this->frequency = frequency;
 }
 
 void TunerTransform::setTaps(std::vector<float> taps)
 {
-    this->taps = taps;
+    // Reassigning the vector reallocates storage; concurrent readers in
+    // work() (via firfilt_crcf_create) would otherwise read freed memory.
+    QMutexLocker ml(&mutex);
+    this->taps = std::move(taps);
 }
 
 float TunerTransform::relativeBandwidth() {
@@ -67,11 +73,13 @@ float TunerTransform::relativeBandwidth() {
 
 void TunerTransform::setRelativeBandwith(float bandwidth)
 {
+    QMutexLocker ml(&mutex);
     this->bandwidth = bandwidth;
 }
 
 size_t TunerTransform::historySize()
 {
+    QMutexLocker ml(&mutex);
     return std::max(static_cast<size_t>(256), taps.size());
 }
 

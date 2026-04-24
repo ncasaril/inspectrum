@@ -29,6 +29,11 @@ class SampleBuffer : public SampleSource<Tout>, public Subscriber
 {
 private:
     std::shared_ptr<SampleSource<Tin>> src;
+
+protected:
+    // Protects work() state (and, by extension, anything work() reads).
+    // Setters in subclasses that mutate that state should lock this mutex
+    // too so they can't race with scans running on worker threads.
     QMutex mutex;
 
 public:
