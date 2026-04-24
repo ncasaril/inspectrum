@@ -143,7 +143,10 @@ void MainWindow::setSampleRate(QString rate)
 
 void MainWindow::setSampleRate(double rate)
 {
-    dock->sampleRate->setText(QString::number(rate));
+    // 'g' format (the QString::number default) switches to scientific at 7+
+    // digits, so 10 MHz renders as "1e+07" and looks to the user like the
+    // rate didn't parse. Display sample rates as plain integers in Hz.
+    dock->sampleRate->setText(QString::number(rate, 'f', 0));
 }
 
 void MainWindow::setFormat(QString fmt)
