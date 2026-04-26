@@ -40,6 +40,10 @@ public:
 private:
     // Liquid-DSP frequency demodulator object
     freqdem      fdem_;
+    // Bandwidth used to create fdem_; rebuilt lazily in work() when the
+    // upstream tuner's relativeBandwidth() changes (e.g. user dragged the
+    // tuner cursors), so freqdem's modulation factor tracks the signal.
+    float        fdemBuiltAtBandwidth_ = -1.0f;
     // Fast instantaneous-frequency demod (phase difference) instead of full FIR
     bool         cheapMode_ = false;
     // Post-demod LPF (built lazily when the upstream sample rate is known).

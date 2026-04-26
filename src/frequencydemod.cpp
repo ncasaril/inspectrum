@@ -33,8 +33,8 @@
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
-    // create the demodulator once
-    fdem_ = freqdem_create(relativeBandwidth() / 2.0);
+    fdemBuiltAtBandwidth_ = relativeBandwidth();
+    fdem_ = freqdem_create(fdemBuiltAtBandwidth_ / 2.0);
 }
 
 FrequencyDemod::~FrequencyDemod()
@@ -158,6 +158,20 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
     // filter is rebuilt here whenever Fs changes and a cutoff is configured.
     if (postLpfCutoffHz_ > 0.0 && (!postLpf_ || postLpfBuiltAtRate_ != rate())) {
         rebuildPostLpf();
+    }
+
+    // Rebuild freqdem when the upstream tuner bandwidth changes. freqdem's
+    // modulation factor (kf) sets its output scale (output ≈ Δφ / (2π·kf));
+    // if kf doesn't track the actual signal bandwidth, output magnitudes
+    // jump dramatically every time the user resizes the tuner, which then
+    // also changes the IIR's transient overshoot and the auto-scaled y-axis.
+    {
+        float curBw = relativeBandwidth();
+        if (curBw != fdemBuiltAtBandwidth_) {
+            freqdem_destroy(fdem_);
+            fdemBuiltAtBandwidth_ = curBw;
+            fdem_ = freqdem_create(curBw / 2.0);
+        }
     }
 
     if (!cheapMode_) {
