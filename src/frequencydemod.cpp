@@ -33,8 +33,15 @@
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
-    fdemBuiltAtBandwidth_ = relativeBandwidth();
-    fdem_ = freqdem_create(fdemBuiltAtBandwidth_ / 2.0);
+    // Use a fixed wide modulation factor (kf ≈ 0.49). This makes freqdem's
+    // output scale invariant to the tuner bandwidth — narrowing or widening
+    // the tuner now changes the *content* the demod sees but not the units of
+    // its output, so the plot's y-axis stays calibrated and doesn't jump
+    // wildly when the user drags the tuner cursors. The trade-off is reduced
+    // dynamic range for very narrow signals (output values are smaller than
+    // they'd be with a tightly-matched kf), but the plot auto-scales anyway.
+    fdemBuiltAtBandwidth_ = 1.0f;
+    fdem_ = freqdem_create(0.49f);
 }
 
 FrequencyDemod::~FrequencyDemod()
@@ -166,19 +173,7 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
         rebuildPostLpf();
     }
 
-    // Rebuild freqdem when the upstream tuner bandwidth changes. freqdem's
-    // modulation factor (kf) sets its output scale (output ≈ Δφ / (2π·kf));
-    // if kf doesn't track the actual signal bandwidth, output magnitudes
-    // jump dramatically every time the user resizes the tuner, which then
-    // also changes the IIR's transient overshoot and the auto-scaled y-axis.
-    {
-        float curBw = relativeBandwidth();
-        if (curBw != fdemBuiltAtBandwidth_) {
-            freqdem_destroy(fdem_);
-            fdemBuiltAtBandwidth_ = curBw;
-            fdem_ = freqdem_create(curBw / 2.0);
-        }
-    }
+    // (freqdem's kf is held fixed at construction — see comment in the ctor.)
 
     if (!cheapMode_) {
         // The demod is stateful and the same object is reused across all
