@@ -42,9 +42,12 @@ private:
     freqdem      fdem_;
     // Fast instantaneous-frequency demod (phase difference) instead of full FIR
     bool         cheapMode_ = false;
-    // Post-demod LPF (built lazily when the upstream sample rate is known)
+    // Post-demod LPF (built lazily when the upstream sample rate is known).
+    // IIR Butterworth — fast at any cutoff, short impulse response (a few
+    // samples). Order 6 ≈ 36 dB/octave which is plenty for FM noise cleanup
+    // and avoids the huge tap count a Kaiser FIR would need at low Fc.
     double       postLpfCutoffHz_ = 0.0;
-    firfilt_rrrf postLpf_ = nullptr;
+    iirfilt_rrrf postLpf_ = nullptr;
     size_t       postLpfLen_ = 0;
     // Cached sample rate used to build postLpf_; rebuilds when it changes.
     double       postLpfBuiltAtRate_ = 0.0;

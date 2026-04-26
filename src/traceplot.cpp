@@ -29,7 +29,7 @@
 #include "samplesource.h"
 #include "traceplot.h"
 
-#define INSPECTRUM_TRACE_DEBUG 1
+#define INSPECTRUM_TRACE_DEBUG 0
 
 TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source) {
     connect(this, &TracePlot::imageReady, this, &TracePlot::handleImage);

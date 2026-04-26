@@ -29,7 +29,7 @@
 
 // Toggle in one place — prints from the demod hot-path are noisy, so leave
 // these off by default and flip to 1 when chasing a regression.
-#define INSPECTRUM_FM_DEBUG 1
+#define INSPECTRUM_FM_DEBUG 0
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
@@ -39,7 +39,7 @@ FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>
 
 FrequencyDemod::~FrequencyDemod()
 {
-    if (postLpf_) firfilt_rrrf_destroy(postLpf_);
+    if (postLpf_) iirfilt_rrrf_destroy(postLpf_);
     freqdem_destroy(fdem_);
 }
 
@@ -77,38 +77,39 @@ void FrequencyDemod::setPostDecimation(int n)
 void FrequencyDemod::rebuildPostLpf()
 {
     if (postLpf_) {
-        firfilt_rrrf_destroy(postLpf_);
+        iirfilt_rrrf_destroy(postLpf_);
         postLpf_ = nullptr;
         postLpfLen_ = 0;
     }
     postLpfBuiltAtRate_ = rate();
     if (postLpfCutoffHz_ <= 0.0 || postLpfBuiltAtRate_ <= 0.0) return;
 
-    // liquid_firdes_kaiser takes normalized cutoff (Fs=1).
+    // Normalized cutoff (Fs = 1). Clamp away from 0 and 0.5 to keep the
+    // Butterworth design well-conditioned.
     double cutoff = postLpfCutoffHz_ / postLpfBuiltAtRate_;
-    if (cutoff >= 0.5) cutoff = 0.49;   // can't cut above Nyquist
-    const float atten = 60.0f;
-    // estimate_req_filter_len uses the transition bandwidth; use the cutoff
-    // itself as a conservative proxy (also clamp for very narrow cutoffs so
-    // filter length doesn't explode).
-    unsigned int len = estimate_req_filter_len(std::max(cutoff, 1e-4), atten);
-    if (len < 3) len = 3;
-    std::vector<float> taps(len);
-    liquid_firdes_kaiser(len, (float)cutoff, atten, 0.0f, taps.data());
-    postLpf_ = firfilt_rrrf_create(taps.data(), len);
-    postLpfLen_ = len;
+    if (cutoff >= 0.499) cutoff = 0.499;
+    if (cutoff <= 1e-6)  cutoff = 1e-6;
+
+    // 6th-order Butterworth: ~36 dB/octave rolloff and ~6-tap impulse decay.
+    // Far cheaper than a Kaiser FIR (which needs thousands of taps for the
+    // same cutoff) and the non-linear phase doesn't matter for visualization.
+    const unsigned int order = 6;
+    postLpf_ = iirfilt_rrrf_create_lowpass(order, static_cast<float>(cutoff));
+    // Used for SampleBuffer lead-in sizing. IIR settles much faster than the
+    // old FIR; a small constant comfortably covers the impulse response of
+    // typical orders (≤ ~12).
+    postLpfLen_ = 64;
 }
 
 void FrequencyDemod::applyPostLpf(float *out, int count)
 {
     if (!postLpf_) return;
     // Reset state each call: getSamples ranges can be non-contiguous. The
-    // SampleBuffer lead-in (historySize() covers the filter length) re-warms
-    // the FIR before the first returned sample.
-    firfilt_rrrf_reset(postLpf_);
+    // SampleBuffer lead-in re-warms the IIR within ~order samples, so the
+    // 64-sample historySize() leeway is plenty.
+    iirfilt_rrrf_reset(postLpf_);
     for (int i = 0; i < count; ++i) {
-        firfilt_rrrf_push(postLpf_, out[i]);
-        firfilt_rrrf_execute(postLpf_, &out[i]);
+        iirfilt_rrrf_execute(postLpf_, out[i], &out[i]);
     }
 }
 
