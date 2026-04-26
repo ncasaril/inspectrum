@@ -91,11 +91,17 @@ void FrequencyDemod::rebuildPostLpf()
     if (cutoff >= 0.499) cutoff = 0.499;
     if (cutoff <= 1e-6)  cutoff = 1e-6;
 
-    // 6th-order Butterworth: ~36 dB/octave rolloff and ~6-tap impulse decay.
-    // Far cheaper than a Kaiser FIR (which needs thousands of taps for the
-    // same cutoff) and the non-linear phase doesn't matter for visualization.
-    const unsigned int order = 6;
-    postLpf_ = iirfilt_rrrf_create_lowpass(order, static_cast<float>(cutoff));
+    // Elliptic IIR (cascaded SOS): closest IIR shape to a Kaiser FIR's brick
+    // wall — sharp transition with bounded passband / stopband ripple. Order
+    // 8 gives a transition width comparable to a long Kaiser FIR at a tiny
+    // fraction of the per-sample cost. SOS formatting keeps coefficients
+    // numerically well-conditioned at low normalized cutoffs.
+    const unsigned int order = 8;
+    const float Ap = 0.1f;   // passband ripple (dB)
+    const float As = 60.0f;  // stopband attenuation (dB)
+    postLpf_ = iirfilt_rrrf_create_prototype(
+        LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
+        order, static_cast<float>(cutoff), 0.0f, Ap, As);
 
     // Step-response settling time for a Butterworth lowpass scales like
     // 1/cutoff_norm. Empirically ~4 / cutoff_norm samples gets us well past
