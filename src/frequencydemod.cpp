@@ -110,13 +110,15 @@ void FrequencyDemod::rebuildPostLpf()
         LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
         order, static_cast<float>(cutoff), 0.0f, Ap, As);
 
-    // Step-response settling time for a Butterworth lowpass scales like
-    // 1/cutoff_norm. Empirically ~4 / cutoff_norm samples gets us well past
-    // any visible overshoot ringing. Cap so a 1 Hz cutoff doesn't try to
-    // allocate gigabyte lead-ins; cap value chosen to keep history under
-    // ~1 MB of complex<float> upstream allocations.
-    constexpr size_t kSettleCap = 200000;
-    double settle = 4.0 / cutoff;
+    // Step-response settling for an Nth-order IIR lowpass scales as
+    // ~1.6·N / cutoff_norm samples to reach ~60 dB below peak ringing.
+    // Elliptic equiripple stopband can keep ringing past this nominal time,
+    // so add a 2× safety factor — the cold-start NaN window has to fully
+    // cover the transient or the auto-scaling y-axis chases the residual
+    // overshoot peaks at the start of the visible range. Cap the result so
+    // sub-Hz cutoffs don't try to allocate gigabytes of upstream lead-in.
+    constexpr size_t kSettleCap = 500000;
+    double settle = 3.2 * order / cutoff;
     if (settle > kSettleCap) settle = kSettleCap;
     lpfSettleSamples_ = static_cast<size_t>(settle);
     // postLpfLen_ feeds into historySize() so SampleBuffer fetches enough
