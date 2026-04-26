@@ -80,6 +80,7 @@ void FrequencyDemod::rebuildPostLpf()
         iirfilt_rrrf_destroy(postLpf_);
         postLpf_ = nullptr;
         postLpfLen_ = 0;
+        lpfSettleSamples_ = 0;
     }
     postLpfBuiltAtRate_ = rate();
     if (postLpfCutoffHz_ <= 0.0 || postLpfBuiltAtRate_ <= 0.0) return;
@@ -95,10 +96,20 @@ void FrequencyDemod::rebuildPostLpf()
     // same cutoff) and the non-linear phase doesn't matter for visualization.
     const unsigned int order = 6;
     postLpf_ = iirfilt_rrrf_create_lowpass(order, static_cast<float>(cutoff));
-    // Used for SampleBuffer lead-in sizing. IIR settles much faster than the
-    // old FIR; a small constant comfortably covers the impulse response of
-    // typical orders (≤ ~12).
-    postLpfLen_ = 64;
+
+    // Step-response settling time for a Butterworth lowpass scales like
+    // 1/cutoff_norm. Empirically ~4 / cutoff_norm samples gets us well past
+    // any visible overshoot ringing. Cap so a 1 Hz cutoff doesn't try to
+    // allocate gigabyte lead-ins; cap value chosen to keep history under
+    // ~1 MB of complex<float> upstream allocations.
+    constexpr size_t kSettleCap = 200000;
+    double settle = 4.0 / cutoff;
+    if (settle > kSettleCap) settle = kSettleCap;
+    lpfSettleSamples_ = static_cast<size_t>(settle);
+    // postLpfLen_ feeds into historySize() so SampleBuffer fetches enough
+    // upstream lead-in to consume the IIR transient before the returned
+    // output begins.
+    postLpfLen_ = lpfSettleSamples_;
 }
 
 void FrequencyDemod::applyPostLpf(float *out, int count)
@@ -175,20 +186,27 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
         }
     }
 
+    // Defensive scrub before the IIR: any non-finite freqdem sample (cold-
+    // start, or numerical edge case) would poison the IIR's recursive state
+    // and turn the entire rest of the chunk into NaN. Replace with zero so
+    // the IIR sees a well-behaved input and just transients from there.
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(out[i])) out[i] = 0.0f;
+    }
+
     applyPostLpf(out, count);
     applyPostDecimation(out, count, sampleid);
 
-    // Mark filter-warmup samples as NaN. SampleBuffer can only fetch
-    // min(start, historySize()) samples of lead-in, so when sampleid is small
-    // (the user is viewing near t=0) the upstream tuner FIR and freqdem are
-    // running from cold zero state and the first samples of work() output are
-    // filter transient — biased toward zero, not real FM. Explicit NaN means
-    // the existing isfinite() guards in the min/max scan and the painter path
-    // skip them rather than treating zeros as real data points and pulling
-    // globalMin/Max toward zero.
-    constexpr size_t COLD_START = 512;
-    if (sampleid < COLD_START) {
-        const size_t bad = std::min<size_t>(COLD_START - sampleid,
+    // Mark filter-warmup samples as NaN. The size of the warmup depends on
+    // what's running:
+    //   - tuner FIR transient (~256 samples)
+    //   - freqdem cold-start (~few samples)
+    //   - post-LPF IIR settle (~4/cutoff_norm samples — can be many thousands)
+    // The existing isfinite() guards in the scan and painter path then skip
+    // these so globalMin/Max isn't biased by IIR overshoot ringing.
+    const size_t coldStart = std::max<size_t>(512, lpfSettleSamples_);
+    if (sampleid < coldStart) {
+        const size_t bad = std::min<size_t>(coldStart - sampleid,
                                             static_cast<size_t>(count));
         for (size_t i = 0; i < bad; ++i) {
             out[i] = std::numeric_limits<float>::quiet_NaN();

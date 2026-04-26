@@ -49,6 +49,10 @@ private:
     double       postLpfCutoffHz_ = 0.0;
     iirfilt_rrrf postLpf_ = nullptr;
     size_t       postLpfLen_ = 0;
+    // Number of samples the IIR needs to settle from a cold-start. Scales
+    // with 1/cutoff_norm (narrow filter → longer settle); used to size both
+    // SampleBuffer's history and the cold-start NaN-mark window.
+    size_t       lpfSettleSamples_ = 0;
     // Cached sample rate used to build postLpf_; rebuilds when it changes.
     double       postLpfBuiltAtRate_ = 0.0;
     // Post-demod block-average decimation. 1 = disabled.
