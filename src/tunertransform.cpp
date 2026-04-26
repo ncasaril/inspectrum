@@ -51,15 +51,6 @@ void TunerTransform::work(void *input, void *output, int count, size_t sampleid)
         firfilt_crcf_execute(filter, &out[i]);
     }
     firfilt_crcf_destroy(filter);
-
-    // Scrub non-finite values so downstream demods don't see NaN/Inf inputs
-    // (which can poison stateful demods like freqdem at t=0 when the filter
-    // output is briefly zero during warmup).
-    for (int i = 0; i < count; ++i) {
-        if (!std::isfinite(out[i].real()) || !std::isfinite(out[i].imag())) {
-            out[i] = std::complex<float>(0.0f, 0.0f);
-        }
-    }
 }
 
 void TunerTransform::setFrequency(float frequency)

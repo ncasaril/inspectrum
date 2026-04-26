@@ -17,6 +17,7 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <QDebug>
 #include <QPixmapCache>
 #include <QTextStream>
 #include <QtConcurrent>
@@ -27,6 +28,8 @@
 #include <algorithm>
 #include "samplesource.h"
 #include "traceplot.h"
+
+#define INSPECTRUM_TRACE_DEBUG 1
 
 TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source) {
     connect(this, &TracePlot::imageReady, this, &TracePlot::handleImage);
@@ -177,7 +180,17 @@ static QPair<double,double> scanComplexRange(SampleSource<std::complex<float>> *
 
 void TracePlot::applyMinMax(QPair<double,double> result)
 {
-    if (!std::isfinite(result.first) || !std::isfinite(result.second)) return;
+#if INSPECTRUM_TRACE_DEBUG
+    qDebug().nospace() << "[TP " << this << "] applyMinMax got ("
+                       << result.first << ", " << result.second << ")"
+                       << " current global=(" << globalMin << ", " << globalMax << ")";
+#endif
+    if (!std::isfinite(result.first) || !std::isfinite(result.second)) {
+#if INSPECTRUM_TRACE_DEBUG
+        qDebug() << "[TP" << this << "] applyMinMax REJECTED — non-finite (no valid samples in scan range)";
+#endif
+        return;
+    }
     bool changed = (globalMin != result.first) || (globalMax != result.second);
     globalMin = result.first;
     globalMax = result.second;
@@ -203,6 +216,11 @@ void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
     // to the plot edges, making the plot look empty. For subsequent paints,
     // keep the scan async to stay responsive during scrolling.
     if (wasFirst) {
+#if INSPECTRUM_TRACE_DEBUG
+        qDebug().nospace() << "[TP " << this << "] sync scan range=("
+                           << sampleRange.minimum << ".." << sampleRange.maximum
+                           << ") len=" << (sampleRange.maximum - sampleRange.minimum);
+#endif
         if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
             applyMinMax(scanFloatRange(srcF, sampleRange));
         } else if (auto srcC = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {

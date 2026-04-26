@@ -19,11 +19,17 @@
 
 #include "frequencydemod.h"
 #include <liquid/liquid.h>
+#include <QDebug>
 #include <QMutexLocker>
 #include <cmath>
 #include <complex>
 #include <algorithm>
+#include <limits>
 #include <vector>
+
+// Toggle in one place — prints from the demod hot-path are noisy, so leave
+// these off by default and flip to 1 when chasing a regression.
+#define INSPECTRUM_FM_DEBUG 1
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
@@ -171,12 +177,39 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
     applyPostLpf(out, count);
     applyPostDecimation(out, count, sampleid);
 
-    // Scrub non-finite values: freqdem's cold-start near sampleid=0 can
-    // produce NaN/Inf when the tuner's fresh FIR feeds it near-zero-magnitude
-    // samples, and NaN can then propagate through the rest of the chunk.
-    // Downstream (min/max scan, painter path) are finite-only, so replace
-    // any junk with zero.
-    for (int i = 0; i < count; ++i) {
-        if (!std::isfinite(out[i])) out[i] = 0.0f;
+    // Mark filter-warmup samples as NaN. SampleBuffer can only fetch
+    // min(start, historySize()) samples of lead-in, so when sampleid is small
+    // (the user is viewing near t=0) the upstream tuner FIR and freqdem are
+    // running from cold zero state and the first samples of work() output are
+    // filter transient — biased toward zero, not real FM. Explicit NaN means
+    // the existing isfinite() guards in the min/max scan and the painter path
+    // skip them rather than treating zeros as real data points and pulling
+    // globalMin/Max toward zero.
+    constexpr size_t COLD_START = 512;
+    if (sampleid < COLD_START) {
+        const size_t bad = std::min<size_t>(COLD_START - sampleid,
+                                            static_cast<size_t>(count));
+        for (size_t i = 0; i < bad; ++i) {
+            out[i] = std::numeric_limits<float>::quiet_NaN();
+        }
     }
+
+#if INSPECTRUM_FM_DEBUG
+    {
+        size_t nans = 0;
+        double mn = std::numeric_limits<double>::infinity();
+        double mx = -std::numeric_limits<double>::infinity();
+        for (int i = 0; i < count; ++i) {
+            if (!std::isfinite(out[i])) { ++nans; continue; }
+            if (out[i] < mn) mn = out[i];
+            if (out[i] > mx) mx = out[i];
+        }
+        qDebug().nospace() << "[FM] work sampleid=" << sampleid
+                           << " count=" << count
+                           << " nans=" << nans
+                           << " finite_min=" << mn
+                           << " finite_max=" << mx
+                           << " cheap=" << cheapMode_;
+    }
+#endif
 }
