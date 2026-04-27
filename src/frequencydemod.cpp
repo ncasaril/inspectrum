@@ -24,12 +24,68 @@
 #include <cmath>
 #include <complex>
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 // Toggle in one place — prints from the demod hot-path are noisy, so leave
 // these off by default and flip to 1 when chasing a regression.
 #define INSPECTRUM_FM_DEBUG 0
+
+namespace {
+// File-scoped, lazily-opened debug log. Activated by setting the env var
+// INSPECTRUM_FM_LOG to a filename (e.g. /tmp/inspectrum_fm.log). Writes are
+// serialised on a single mutex so multi-tile traces stay readable. The whole
+// thing is a no-op when the env var is unset, so leaving the support compiled
+// in costs nothing on a normal run.
+class FmLog {
+public:
+    static FmLog &instance() {
+        static FmLog s;
+        return s;
+    }
+    bool enabled() const { return file_ != nullptr; }
+    void writef(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
+        if (!file_) return;
+        std::lock_guard<std::mutex> lk(m_);
+        va_list ap;
+        va_start(ap, fmt);
+        vfprintf(file_, fmt, ap);
+        va_end(ap);
+        fflush(file_);
+    }
+private:
+    FmLog() {
+        const char *p = std::getenv("INSPECTRUM_FM_LOG");
+        if (p && *p) {
+            file_ = std::fopen(p, "w");
+            if (file_) {
+                std::fprintf(file_, "# inspectrum FM demod log — fields: "
+                                    "tid sampleid count method cutoffHz coldStart "
+                                    "preNan finiteMin finiteMax postNan finiteMinAfter "
+                                    "finiteMaxAfter\n");
+                std::fflush(file_);
+            }
+        }
+    }
+    ~FmLog() { if (file_) std::fclose(file_); }
+    std::mutex m_;
+    std::FILE *file_ = nullptr;
+};
+
+const char *methodName(int m) {
+    switch (m) {
+    case 0: return "kaiserFir";
+    case 1: return "butterIir";
+    case 2: return "ellipIir";
+    default: return "unknown";
+    }
+}
+} // namespace
 
 FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
@@ -122,6 +178,13 @@ void FrequencyDemod::rebuildPostLpf()
         if (len < 3) len = 3;
         std::vector<float> taps(len);
         liquid_firdes_kaiser(len, static_cast<float>(cutoff), atten, 0.0f, taps.data());
+        // liquid_firdes_kaiser returns un-normalised taps — sum diverges from
+        // 1.0 by a few % at typical lengths, so the Kaiser path used to
+        // produce a different magnitude than the IIRs. Renormalise to unity
+        // DC gain so the three filter methods are directly comparable.
+        double dc = 0.0;
+        for (auto t : taps) dc += t;
+        if (dc != 0.0) for (auto &t : taps) t = static_cast<float>(t / dc);
         postFir_ = firfilt_rrrf_create(taps.data(), len);
         // FIR is linear-phase; the impulse fully fits in `len` samples, so
         // the lead-in / cold-start window is just the tap count.
@@ -131,10 +194,14 @@ void FrequencyDemod::rebuildPostLpf()
     }
     case LpfMethod::ButterworthIir: {
         // Cheap maximally-flat IIR. ~36 dB/octave at order 6, no ripple.
-        // Settles much faster than elliptic for the same order because the
-        // step response has no equiripple tail.
+        // Built via the SOS prototype path: cascaded biquads stay
+        // numerically well-conditioned at low normalised cutoffs (a
+        // direct-form order-6 at fc/fs = 5e-4 is broken in float32 — the
+        // poles cluster at z=1 and the coefficients lose precision).
         const unsigned int order = 6;
-        postIir_ = iirfilt_rrrf_create_lowpass(order, static_cast<float>(cutoff));
+        postIir_ = iirfilt_rrrf_create_prototype(
+            LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
+            order, static_cast<float>(cutoff), 0.0f, 0.1f, 60.0f);
         constexpr size_t kSettleCap = 500000;
         double settle = 2.0 * order / cutoff;
         if (settle > kSettleCap) settle = kSettleCap;
@@ -163,6 +230,13 @@ void FrequencyDemod::rebuildPostLpf()
         break;
     }
     }
+
+    FmLog::instance().writef(
+        "rebuildPostLpf: method=%s cutoffHz=%.3f Fs=%.0f cutoffNorm=%.6e "
+        "postLpfLen=%zu lpfSettle=%zu\n",
+        methodName(static_cast<int>(postLpfMethod_)),
+        postLpfCutoffHz_, postLpfBuiltAtRate_, cutoff,
+        postLpfLen_, lpfSettleSamples_);
 }
 
 void FrequencyDemod::applyPostLpf(float *out, int count)
@@ -257,8 +331,35 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
         if (!std::isfinite(out[i])) out[i] = 0.0f;
     }
 
+    // Stats just before the LPF — useful when comparing what each filter is
+    // fed against what it produces. Skip the per-sample scan unless the log
+    // is actually open (env var is set), so the hot path stays cheap.
+    double preMn = 0.0, preMx = 0.0;
+    if (FmLog::instance().enabled()) {
+        preMn = std::numeric_limits<double>::infinity();
+        preMx = -std::numeric_limits<double>::infinity();
+        for (int i = 0; i < count; ++i) {
+            if (out[i] < preMn) preMn = out[i];
+            if (out[i] > preMx) preMx = out[i];
+        }
+    }
+
     applyPostLpf(out, count);
     applyPostDecimation(out, count, sampleid);
+
+    // Stats after the LPF (still pre-NaN-mark) so we can see what the filter
+    // produced before the cold-start mask hides it.
+    double postMn = 0.0, postMx = 0.0;
+    size_t postNonFinite = 0;
+    if (FmLog::instance().enabled()) {
+        postMn = std::numeric_limits<double>::infinity();
+        postMx = -std::numeric_limits<double>::infinity();
+        for (int i = 0; i < count; ++i) {
+            if (!std::isfinite(out[i])) { ++postNonFinite; continue; }
+            if (out[i] < postMn) postMn = out[i];
+            if (out[i] > postMx) postMx = out[i];
+        }
+    }
 
     // Mark filter-warmup samples as NaN. The size of the warmup depends on
     // what's running:
@@ -274,6 +375,27 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
         for (size_t i = 0; i < bad; ++i) {
             out[i] = std::numeric_limits<float>::quiet_NaN();
         }
+    }
+
+    if (FmLog::instance().enabled()) {
+        size_t nans = 0;
+        double mn = std::numeric_limits<double>::infinity();
+        double mx = -std::numeric_limits<double>::infinity();
+        for (int i = 0; i < count; ++i) {
+            if (!std::isfinite(out[i])) { ++nans; continue; }
+            if (out[i] < mn) mn = out[i];
+            if (out[i] > mx) mx = out[i];
+        }
+        auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffff;
+        FmLog::instance().writef(
+            "work tid=0x%04zx sampleid=%zu count=%d method=%s cutoffHz=%.3f "
+            "coldStart=%zu preMin=%.6g preMax=%.6g postMin=%.6g postMax=%.6g "
+            "postNonFinite=%zu finalNaN=%zu finalMin=%.6g finalMax=%.6g "
+            "cheap=%d\n",
+            tid, sampleid, count,
+            methodName(static_cast<int>(postLpfMethod_)), postLpfCutoffHz_,
+            coldStart, preMn, preMx, postMn, postMx,
+            postNonFinite, nans, mn, mx, cheapMode_ ? 1 : 0);
     }
 
 #if INSPECTRUM_FM_DEBUG
