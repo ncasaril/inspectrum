@@ -444,16 +444,31 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
             if (out[i] < mn) mn = out[i];
             if (out[i] > mx) mx = out[i];
         }
+        // The kept/visible region is the last `count - postLpfLen_` samples;
+        // SampleBuffer discards the leading postLpfLen_ samples (the lead-in
+        // that warms up the filter). Compute stats just over that slice so
+        // we can tell whether transients live in the discarded lead-in
+        // (invisible) or leak into the visible plot.
+        const size_t lead = std::min(postLpfLen_, static_cast<size_t>(count));
+        size_t keptNan = 0;
+        double keptMn = std::numeric_limits<double>::infinity();
+        double keptMx = -std::numeric_limits<double>::infinity();
+        for (size_t i = lead; i < static_cast<size_t>(count); ++i) {
+            if (!std::isfinite(out[i])) { ++keptNan; continue; }
+            if (out[i] < keptMn) keptMn = out[i];
+            if (out[i] > keptMx) keptMx = out[i];
+        }
         auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffff;
         FmLog::instance().writef(
             "work tid=0x%04zx sampleid=%zu count=%d method=%s cutoffHz=%.3f "
             "coldStart=%zu preMin=%.6g preMax=%.6g postMin=%.6g postMax=%.6g "
             "postNonFinite=%zu finalNaN=%zu finalMin=%.6g finalMax=%.6g "
-            "cheap=%d\n",
+            "keptLead=%zu keptNaN=%zu keptMin=%.6g keptMax=%.6g cheap=%d\n",
             tid, sampleid, count,
             methodName(static_cast<int>(postLpfMethod_)), postLpfCutoffHz_,
             coldStart, preMn, preMx, postMn, postMx,
-            postNonFinite, nans, mn, mx, cheapMode_ ? 1 : 0);
+            postNonFinite, nans, mn, mx,
+            lead, keptNan, keptMn, keptMx, cheapMode_ ? 1 : 0);
     }
 
 #if INSPECTRUM_FM_DEBUG
