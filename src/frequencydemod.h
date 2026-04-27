@@ -20,6 +20,9 @@
 #pragma once
 #include <liquid/liquid.h>
 
+#include <QMutex>
+#include <vector>
+
 #include "samplebuffer.h"
 
 class FrequencyDemod : public SampleBuffer<std::complex<float>, float>
@@ -39,9 +42,18 @@ public:
     virtual ~FrequencyDemod();
     void work(void *input, void *output, int count, size_t sampleid) override;
     size_t historySize() override;
+    // Override SampleBuffer's per-tile getSamples so the IIR backends can
+    // run filtfilt over a *batched* range and serve sliced results from a
+    // cache. Filtfilt is non-composable across tile boundaries (each tile's
+    // independent forward+reverse pass picks up its own boundary conditions
+    // → visible step discontinuities at every seam) so per-tile filtfilt
+    // never produces a clean plot. Kaiser FIR is composable and falls
+    // through to the standard per-tile path unchanged.
+    std::unique_ptr<float[]> getSamples(size_t start, size_t length) override;
+    void invalidateEvent() override;
 
     // Toggle fast-path demodulation (instantaneous phase diff).
-    void setCheapDemod(bool enabled) { cheapMode_ = enabled; }
+    void setCheapDemod(bool enabled);
     // Post-demod LPF cutoff in Hz. 0 disables the filter.
     void setPostLpfCutoff(double hz);
     // Select which LPF implementation to use.
@@ -79,4 +91,26 @@ private:
     void rebuildPostLpf();
     void applyPostLpf(float *out, int count);
     void applyPostDecimation(float *out, int count, size_t sampleid);
+
+    // Batched-filter cache used by the IIR backends so that all tiles in a
+    // frame slice from the same single forward+reverse pass — the only way
+    // to make filtfilt produce a continuous result across tile boundaries.
+    // Guarded by batchMutex_; filter rebuild and freqdem state still go
+    // through the SampleBuffer base mutex.
+    struct BatchCache {
+        size_t       startSample = 0;
+        size_t       length = 0;
+        std::vector<float> data;
+        bool         valid = false;
+        // Snapshot the filter parameters used to populate this cache. Any
+        // change here invalidates the entry on the next access.
+        LpfMethod    method = LpfMethod::KaiserFir;
+        double       cutoffHz = 0.0;
+        double       rate = 0.0;
+        bool         cheap = false;
+    };
+    QMutex      batchMutex_;
+    BatchCache  batchCache_;
+    void invalidateBatchCache();
+    bool fillBatchCache(size_t needStart, size_t needEnd);
 };

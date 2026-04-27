@@ -115,6 +115,23 @@ size_t FrequencyDemod::historySize()
     return base;
 }
 
+void FrequencyDemod::invalidateBatchCache()
+{
+    QMutexLocker ml(&batchMutex_);
+    batchCache_.valid = false;
+    batchCache_.length = 0;
+    batchCache_.startSample = 0;
+    // Drop the buffer so we don't hang onto megabytes after a parameter
+    // change — the next request will repopulate.
+    std::vector<float>().swap(batchCache_.data);
+}
+
+void FrequencyDemod::invalidateEvent()
+{
+    invalidateBatchCache();
+    SampleBuffer::invalidateEvent();
+}
+
 void FrequencyDemod::setPostLpfCutoff(double hz)
 {
     if (hz < 0.0) hz = 0.0;
@@ -124,6 +141,7 @@ void FrequencyDemod::setPostLpfCutoff(double hz)
         postLpfCutoffHz_ = hz;
         rebuildPostLpf(); // assumes mutex held
     }
+    invalidateBatchCache();
     invalidate();
 }
 
@@ -135,6 +153,7 @@ void FrequencyDemod::setPostLpfMethod(LpfMethod m)
         postLpfMethod_ = m;
         rebuildPostLpf(); // assumes mutex held
     }
+    invalidateBatchCache();
     invalidate();
 }
 
@@ -146,6 +165,18 @@ void FrequencyDemod::setPostDecimation(int n)
         if (n == postDecim_) return;
         postDecim_ = n;
     }
+    invalidateBatchCache();
+    invalidate();
+}
+
+void FrequencyDemod::setCheapDemod(bool enabled)
+{
+    {
+        QMutexLocker ml(&mutex);
+        if (enabled == cheapMode_) return;
+        cheapMode_ = enabled;
+    }
+    invalidateBatchCache();
     invalidate();
 }
 
@@ -338,6 +369,202 @@ void FrequencyDemod::applyPostDecimation(float *out, int count, size_t sampleid)
         for (int j = clip_start; j < clip_end; ++j) out[j] = avg;
         i = clip_end;
     }
+}
+
+bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
+{
+    // Caller must hold batchMutex_. Builds (or rebuilds) the cache so that
+    // it covers [needStart, needEnd). Pulls a wider range than strictly
+    // requested so successive tile requests panning around the same view
+    // hit the cache cheaply, and so the filtfilt has plenty of margin on
+    // both sides for its forward and reverse passes to settle outside the
+    // visible region.
+    const size_t total = count();
+    if (needEnd > total) needEnd = total;
+    if (needStart >= needEnd) return false;
+
+    // Snapshot filter parameters (the main mutex protects these from setter
+    // changes; a setter that wins the race will also have called
+    // invalidateBatchCache() so a stale cache won't survive).
+    LpfMethod method;
+    double    cutoffHz;
+    double    fs;
+    size_t    settle;
+    bool      cheap;
+    {
+        QMutexLocker ml(&mutex);
+        method   = postLpfMethod_;
+        cutoffHz = postLpfCutoffHz_;
+        fs       = rate();
+        settle   = lpfSettleSamples_ ? lpfSettleSamples_ : 4096;
+        cheap    = cheapMode_;
+    }
+
+    // Aim for a generous batch: at least 4× the requested range, with
+    // settle-many samples of margin on each side, and never less than 1 M
+    // samples (so casual panning stays in cache). Capped so a 100 GB file
+    // doesn't try to allocate ridiculous amounts of memory.
+    constexpr size_t kMinBatch = 1'000'000;
+    constexpr size_t kMaxBatch = 8'000'000;
+    const size_t reqLen = needEnd - needStart;
+    size_t margin = std::max<size_t>(settle, 4096);
+    size_t want   = std::max(kMinBatch, reqLen + 2 * margin);
+    if (want > kMaxBatch) want = kMaxBatch;
+    size_t centre = needStart + reqLen / 2;
+    size_t half   = want / 2;
+    size_t start  = (centre > half) ? (centre - half) : 0;
+    size_t end    = std::min(start + want, total);
+    // If we hit the end of the file, slide the window left so we still have
+    // the requested range covered.
+    if (end - start < want && start > 0) {
+        size_t shift = std::min(start, want - (end - start));
+        start -= shift;
+    }
+    if (start > needStart) start = needStart;
+    if (end   < needEnd)   end   = needEnd;
+    const size_t batchLen = end - start;
+    if (batchLen == 0) return false;
+
+    // Pull raw IQ from the upstream tuner. This one big getSamples call
+    // does the upstream lead-in once (Kaiser FIR tuner cold-start), so the
+    // freqdem and post-LPF below see a continuous, fully-warmed input.
+    auto rawIq = src->getSamples(start, batchLen);
+    if (!rawIq) return false;
+
+    // Demod the whole batch with a single freqdem pass so its internal
+    // state tracks the signal continuously across what would otherwise be
+    // tile boundaries.
+    std::vector<float> demod(batchLen);
+    {
+        QMutexLocker ml(&mutex);
+        if (cheap) {
+            if (batchLen > 0) {
+                std::complex<float> prev = rawIq[0];
+                demod[0] = 0.0f;
+                for (size_t i = 1; i < batchLen; ++i) {
+                    demod[i] = std::arg(rawIq[i] * std::conj(prev));
+                    prev = rawIq[i];
+                }
+            }
+        } else {
+            freqdem_reset(fdem_);
+            for (size_t i = 0; i < batchLen; ++i) {
+                float dem;
+                freqdem_demodulate(
+                    fdem_,
+                    *reinterpret_cast<liquid_float_complex*>(&rawIq[i]),
+                    &dem);
+                demod[i] = dem;
+            }
+        }
+        // Scrub non-finite freqdem output before the LPF — recursive IIR
+        // state would propagate any NaN forever.
+        for (size_t i = 0; i < batchLen; ++i) {
+            if (!std::isfinite(demod[i])) demod[i] = 0.0f;
+        }
+
+        // LPF (filtfilt for IIR; one-pass for FIR — although this code
+        // path is only entered for IIR methods).
+        if (method == LpfMethod::KaiserFir) {
+            // For Kaiser the per-tile path is correct (FIR is composable);
+            // we only end up here if the caller bypassed that intentionally.
+            if (postFir_) {
+                firfilt_rrrf_reset(postFir_);
+                for (size_t i = 0; i < batchLen; ++i) {
+                    firfilt_rrrf_push(postFir_, demod[i]);
+                    firfilt_rrrf_execute(postFir_, &demod[i]);
+                }
+            }
+        } else if (postIir_) {
+            // Forward pass over the entire batch.
+            iirfilt_rrrf_reset(postIir_);
+            for (size_t i = 0; i < batchLen; ++i) {
+                iirfilt_rrrf_execute(postIir_, demod[i], &demod[i]);
+            }
+            // Constant-pad on the right with the last forward-output value
+            // so the reverse pass cold-start happens in a benign region
+            // and settles to the same DC the data ends at.
+            const size_t pad = std::min<size_t>(settle, batchLen);
+            std::vector<float> tail(pad, demod.empty() ? 0.0f : demod.back());
+            // Reverse pass: pad first, then data, in reverse time order.
+            iirfilt_rrrf_reset(postIir_);
+            for (size_t i = 0; i < pad; ++i) {
+                float dummy;
+                iirfilt_rrrf_execute(postIir_, tail[i], &dummy);
+            }
+            for (size_t i = 0; i < batchLen; ++i) {
+                const size_t j = batchLen - 1 - i;
+                iirfilt_rrrf_execute(postIir_, demod[j], &demod[j]);
+            }
+        }
+
+        // Cold-start NaN mask: the file's first lpfSettleSamples_ are
+        // forward-pass transient and shouldn't bias the auto-scaling scan.
+        // Apply it in absolute (file-relative) coordinates so the same
+        // samples are masked regardless of which batch contains them.
+        const size_t coldStart = std::max<size_t>(512, settle);
+        if (start < coldStart) {
+            const size_t bad = std::min(coldStart - start, batchLen);
+            for (size_t i = 0; i < bad; ++i) {
+                demod[i] = std::numeric_limits<float>::quiet_NaN();
+            }
+        }
+    }
+
+    batchCache_.startSample = start;
+    batchCache_.length      = batchLen;
+    batchCache_.data        = std::move(demod);
+    batchCache_.valid       = true;
+    batchCache_.method      = method;
+    batchCache_.cutoffHz    = cutoffHz;
+    batchCache_.rate        = fs;
+    batchCache_.cheap       = cheap;
+
+    FmLog::instance().writef(
+        "fillBatchCache: method=%s cutoffHz=%.3f start=%zu len=%zu (covering "
+        "request [%zu, %zu))\n",
+        methodName(static_cast<int>(method)), cutoffHz, start, batchLen,
+        needStart, needEnd);
+    return true;
+}
+
+std::unique_ptr<float[]> FrequencyDemod::getSamples(size_t start, size_t length)
+{
+    // Snapshot the current method under the main mutex so we can decide
+    // which path to take without holding it through the slow filter run.
+    LpfMethod method;
+    double    cutoffHz;
+    {
+        QMutexLocker ml(&mutex);
+        method   = postLpfMethod_;
+        cutoffHz = postLpfCutoffHz_;
+    }
+
+    // Kaiser FIR (or "no LPF" / cheap mode without LPF) is composable
+    // across tile boundaries — fall through to the standard SampleBuffer
+    // pattern, which has the parallel-friendly per-tile work() path.
+    if (method == LpfMethod::KaiserFir || cutoffHz <= 0.0) {
+        return SampleBuffer::getSamples(start, length);
+    }
+
+    // IIR backends: serve from the batch cache so all tiles in the same
+    // view slice from a single continuous filtfilt pass.
+    QMutexLocker ml(&batchMutex_);
+    const bool covers = batchCache_.valid &&
+                        batchCache_.method   == method &&
+                        batchCache_.cutoffHz == cutoffHz &&
+                        start >= batchCache_.startSample &&
+                        (start + length) <=
+                            (batchCache_.startSample + batchCache_.length);
+    if (!covers) {
+        if (!fillBatchCache(start, start + length)) return nullptr;
+    }
+
+    auto result = std::make_unique<float[]>(length);
+    const size_t offset = start - batchCache_.startSample;
+    std::memcpy(result.get(), batchCache_.data.data() + offset,
+                length * sizeof(float));
+    return result;
 }
 
 void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
