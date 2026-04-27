@@ -27,6 +27,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -257,12 +258,44 @@ void FrequencyDemod::applyPostLpf(float *out, int count)
             firfilt_rrrf_push(postFir_, out[i]);
             firfilt_rrrf_execute(postFir_, &out[i]);
         }
-    } else if (postIir_) {
-        iirfilt_rrrf_reset(postIir_);
-        for (int i = 0; i < count; ++i) {
-            iirfilt_rrrf_execute(postIir_, out[i], &out[i]);
+        return;
+    }
+    if (!postIir_) return;
+
+    // IIR backends run filtfilt (forward then reversed) so the visible plot
+    // gets a zero-phase response — the wave shape is preserved like a
+    // linear-phase FIR even though we're using cheap-per-sample biquads.
+    //
+    // Forward pass uses the leading SampleBuffer history to warm up. Reverse
+    // pass starts at the right-hand edge of the buffer and would corrupt the
+    // last lpfSettleSamples_ samples of every tile if run directly. Pad the
+    // right with edge-reflected samples (matches scipy.signal.filtfilt's
+    // default) so the reverse pass cold-start happens in the pad region and
+    // the real data is fully settled by the time it's reached.
+    const int pad = std::min<int>(static_cast<int>(lpfSettleSamples_),
+                                  std::max(count, 1));
+    std::vector<float> buf(static_cast<size_t>(count) + pad);
+    std::memcpy(buf.data(), out, count * sizeof(float));
+    if (pad > 0 && count > 0) {
+        // Odd reflection around the last sample: 2*last - x[count-2-i].
+        // Avoids introducing a step at the boundary that would itself ring.
+        const float last = out[count - 1];
+        for (int i = 0; i < pad; ++i) {
+            const int src = (count - 2 - i >= 0) ? (count - 2 - i) : 0;
+            buf[count + i] = 2.0f * last - out[src];
         }
     }
+
+    iirfilt_rrrf_reset(postIir_);
+    for (size_t i = 0; i < buf.size(); ++i) {
+        iirfilt_rrrf_execute(postIir_, buf[i], &buf[i]);
+    }
+    iirfilt_rrrf_reset(postIir_);
+    for (size_t i = 0; i < buf.size(); ++i) {
+        const size_t j = buf.size() - 1 - i;
+        iirfilt_rrrf_execute(postIir_, buf[j], &buf[j]);
+    }
+    std::memcpy(out, buf.data(), count * sizeof(float));
 }
 
 void FrequencyDemod::applyPostDecimation(float *out, int count, size_t sampleid)
