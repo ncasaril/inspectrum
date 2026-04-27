@@ -151,6 +151,18 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         double hz = fmLpfLineEdit->text().toDouble(&ok);
         if (ok) emit fmLpfChanged(hz);
     });
+    // FM pre-demod IQ decimation factor (M). 1 = off; M>1 routes the chain
+    // through a polyphase decimator → freqdem at Fs/M → LPF at Fs/M → hold.
+    fmPredemodDecimSpinBox = new QSpinBox(widget);
+    fmPredemodDecimSpinBox->setRange(1, 1000);
+    fmPredemodDecimSpinBox->setValue(1);
+    fmPredemodDecimSpinBox->setToolTip(tr(
+        "Decimate the IQ stream by M before the FM demod (IQEngine pattern). "
+        "M=1 disables; M>1 keeps the post-LPF in a numerically clean regime."));
+    layout->addRow(new QLabel(tr("FM predemod decim (M):")), fmPredemodDecimSpinBox);
+    connect(fmPredemodDecimSpinBox,
+            static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::fmPredemodDecimChanged);
     // FM post-demod block-average decimation factor. 1 = disabled.
     fmDecimSpinBox = new QSpinBox(widget);
     fmDecimSpinBox->setRange(1, 4096);

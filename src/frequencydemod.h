@@ -62,6 +62,12 @@ public:
     void setPostLpfMethod(LpfMethod m);
     // Block-averaging decimation on the post-demod stream. N=1 disables.
     void setPostDecimation(int n);
+    // Pre-demod decimation factor (M). M=1 disables; M>1 routes the chain
+    // through a polyphase IQ decimator → freqdem at Fs/M → LPF at Fs/M →
+    // hold-expand back to Fs. This is the IQEngine pattern: doing the FM
+    // demod and post-LPF at a low rate keeps the post-LPF in a numerically
+    // well-conditioned regime and shrinks every filter's tap budget.
+    void setPredemodDecimation(int m);
 
 private:
     // Liquid-DSP frequency demodulator object
@@ -88,6 +94,9 @@ private:
     double       postLpfBuiltAtRate_ = 0.0;
     // Post-demod block-average decimation. 1 = disabled.
     int          postDecim_ = 1;
+    // Pre-demod IQ decimation factor (1 = disabled). When >1 the batched
+    // path runs the entire chain at Fs/M.
+    int          predemodDecim_ = 1;
 
     void destroyPostLpf();
     void rebuildPostLpf();
@@ -110,6 +119,7 @@ private:
         double       cutoffHz = 0.0;
         double       rate = 0.0;
         bool         cheap = false;
+        int          decim = 1;
     };
     QMutex      batchMutex_;
     BatchCache  batchCache_;

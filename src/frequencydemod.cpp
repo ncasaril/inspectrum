@@ -180,6 +180,18 @@ void FrequencyDemod::setCheapDemod(bool enabled)
     invalidate();
 }
 
+void FrequencyDemod::setPredemodDecimation(int m)
+{
+    if (m < 1) m = 1;
+    {
+        QMutexLocker ml(&mutex);
+        if (m == predemodDecim_) return;
+        predemodDecim_ = m;
+    }
+    invalidateBatchCache();
+    invalidate();
+}
+
 void FrequencyDemod::destroyPostLpf()
 {
     if (postFir_) { firfilt_rrrf_destroy(postFir_); postFir_ = nullptr; }
@@ -369,6 +381,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     double    fs;
     size_t    settle;
     bool      cheap;
+    int       decim;
     {
         QMutexLocker ml(&mutex);
         method   = postLpfMethod_;
@@ -376,7 +389,9 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
         fs       = rate();
         settle   = lpfSettleSamples_ ? lpfSettleSamples_ : 4096;
         cheap    = cheapMode_;
+        decim    = predemodDecim_;
     }
+    if (decim < 1) decim = 1;
 
     // Aim for a generous batch: at least 4× the requested range, with
     // settle-many samples of margin on each side, and never less than 1 M
@@ -409,97 +424,149 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     auto rawIq = src->getSamples(start, batchLen);
     if (!rawIq) return false;
 
-    // Demod the whole batch with a single freqdem pass so its internal
-    // state tracks the signal continuously across what would otherwise be
-    // tile boundaries.
-    std::vector<float> demod(batchLen);
+    // The chain runs at an "effective" sample rate fsEff = fs / decim. When
+    // decim == 1 this is just fs and the IQ buffer is used directly; when
+    // decim > 1 the IQ is first run through a polyphase multistage decimator
+    // so the freqdem and post-LPF operate at a rate where the user's cutoff
+    // (fc/fsEff) lands in the well-conditioned 0.01..0.1 range. After the
+    // LPF, hold-expand so the output buffer is still batchLen samples wide
+    // (one stretched value per decim input samples).
+    const double fsEff = fs / decim;
+    const std::complex<float> *iqEff = rawIq.get();
+    std::vector<std::complex<float>> decimIq;
+    size_t lenEff = batchLen;
+    if (decim > 1) {
+        // Liquid's multistage halfband resampler. rate = 1/M for decimation;
+        // 60 dB stopband is plenty for this visualisation use. Reset before
+        // each batch so the cache is deterministic.
+        msresamp_crcf rs = msresamp_crcf_create(1.0f / static_cast<float>(decim),
+                                                60.0f);
+        msresamp_crcf_reset(rs);
+        decimIq.resize(batchLen / static_cast<size_t>(decim) + 64);
+        unsigned int nOut = 0;
+        msresamp_crcf_execute(
+            rs,
+            reinterpret_cast<liquid_float_complex*>(rawIq.get()),
+            static_cast<unsigned int>(batchLen),
+            reinterpret_cast<liquid_float_complex*>(decimIq.data()),
+            &nOut);
+        msresamp_crcf_destroy(rs);
+        decimIq.resize(nOut);
+        iqEff = decimIq.data();
+        lenEff = nOut;
+    }
+
+    // Demod at the effective rate. The same freqdem object is reused — kf is
+    // fixed (see ctor), so it's invariant under sample rate, and reset at
+    // the start of every batch keeps state deterministic.
+    std::vector<float> demod(lenEff);
     {
         QMutexLocker ml(&mutex);
         if (cheap) {
-            if (batchLen > 0) {
-                std::complex<float> prev = rawIq[0];
+            if (lenEff > 0) {
+                std::complex<float> prev = iqEff[0];
                 demod[0] = 0.0f;
-                for (size_t i = 1; i < batchLen; ++i) {
-                    demod[i] = std::arg(rawIq[i] * std::conj(prev));
-                    prev = rawIq[i];
+                for (size_t i = 1; i < lenEff; ++i) {
+                    demod[i] = std::arg(iqEff[i] * std::conj(prev));
+                    prev = iqEff[i];
                 }
             }
         } else {
             freqdem_reset(fdem_);
-            for (size_t i = 0; i < batchLen; ++i) {
+            for (size_t i = 0; i < lenEff; ++i) {
                 float dem;
                 freqdem_demodulate(
                     fdem_,
-                    *reinterpret_cast<liquid_float_complex*>(&rawIq[i]),
+                    *reinterpret_cast<liquid_float_complex*>(
+                        const_cast<std::complex<float>*>(&iqEff[i])),
                     &dem);
                 demod[i] = dem;
             }
         }
-        // Scrub non-finite freqdem output before the LPF — recursive IIR
-        // state would propagate any NaN forever.
-        for (size_t i = 0; i < batchLen; ++i) {
+        for (size_t i = 0; i < lenEff; ++i) {
             if (!std::isfinite(demod[i])) demod[i] = 0.0f;
         }
 
-        // LPF (filtfilt for IIR; one-pass for FIR — although this code
-        // path is only entered for IIR methods).
-        if (method == LpfMethod::KaiserFir) {
-            // For Kaiser the per-tile path is correct (FIR is composable);
-            // we only end up here if the caller bypassed that intentionally.
-            if (postFir_) {
-                firfilt_rrrf_reset(postFir_);
-                for (size_t i = 0; i < batchLen; ++i) {
-                    firfilt_rrrf_push(postFir_, demod[i]);
-                    firfilt_rrrf_execute(postFir_, &demod[i]);
-                }
-            }
-        } else if (postIir_) {
-            // Filtfilt with bilateral constant padding. The forward pass
-            // cold-starts at the *start* of the buffer (state = 0); we pad
-            // the left with `first_sample` so the forward filter settles
-            // to that constant in the pad, then enters the data already
-            // matched at the boundary. The reverse pass cold-starts at the
-            // *end* of the buffer; we pad the right with the *forward
-            // pass*'s last output value (after running forward) so the
-            // reverse filter settles to that constant in its pad, then
-            // enters the data with the right initial conditions.
-            //
-            // Net result: the entire data region is fully settled for both
-            // passes — no NaN cold-start window needed at the start of the
-            // file, no boundary transients anywhere.
-            const size_t leftPad  = std::min<size_t>(settle, batchLen);
-            const size_t rightPad = std::min<size_t>(settle, batchLen);
-            std::vector<float> ext(leftPad + batchLen + rightPad);
-            const float first = batchLen > 0 ? demod[0] : 0.0f;
-            for (size_t i = 0; i < leftPad; ++i) ext[i] = first;
-            std::memcpy(ext.data() + leftPad, demod.data(),
-                        batchLen * sizeof(float));
-            // Right pad gets the data's last value before forward pass.
-            // The forward pass will smooth its output across the
-            // pad/data boundary; the *output* in the right pad ends up
-            // at whatever the filter settled to over the data, which is
-            // exactly what we want as the reverse pass's seed.
-            const float last = batchLen > 0 ? demod[batchLen - 1] : 0.0f;
-            for (size_t i = 0; i < rightPad; ++i) {
-                ext[leftPad + batchLen + i] = last;
-            }
+        // Build a fresh LPF for fsEff each call (cheap — designs a few
+        // hundred taps at most for Kaiser, or a small SOS cascade for IIR).
+        // Doing it locally rather than reusing the per-tile postFir_/postIir_
+        // avoids any rate-mismatch when the user toggles decim or cutoff.
+        if (cutoffHz > 0.0 && lenEff > 0) {
+            double cutoffNorm = cutoffHz / fsEff;
+            if (cutoffNorm >= 0.499) cutoffNorm = 0.499;
+            if (cutoffNorm <= 1e-6)  cutoffNorm = 1e-6;
 
-            iirfilt_rrrf_reset(postIir_);
-            for (size_t i = 0; i < ext.size(); ++i) {
-                iirfilt_rrrf_execute(postIir_, ext[i], &ext[i]);
+            if (method == LpfMethod::KaiserFir) {
+                constexpr unsigned int kMaxTaps = 4096;
+                const float atten = 60.0f;
+                unsigned int len = estimate_req_filter_len(
+                    std::max(cutoffNorm, 1e-4), atten);
+                if (len < 3) len = 3;
+                if (len > kMaxTaps) len = kMaxTaps;
+                if (len > lenEff) len = std::max<size_t>(lenEff, 3);
+                std::vector<float> taps(len);
+                liquid_firdes_kaiser(len, static_cast<float>(cutoffNorm),
+                                     atten, 0.0f, taps.data());
+                double dc = 0.0;
+                for (auto t : taps) dc += t;
+                if (dc != 0.0) for (auto &t : taps) t = static_cast<float>(t / dc);
+                firfilt_rrrf fir = firfilt_rrrf_create(taps.data(), len);
+                firfilt_rrrf_reset(fir);
+                for (size_t i = 0; i < lenEff; ++i) {
+                    firfilt_rrrf_push(fir, demod[i]);
+                    firfilt_rrrf_execute(fir, &demod[i]);
+                }
+                firfilt_rrrf_destroy(fir);
+            } else {
+                // Butterworth filtfilt with bilateral constant pad.
+                const unsigned int order = 6;
+                iirfilt_rrrf iir = iirfilt_rrrf_create_prototype(
+                    LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS,
+                    LIQUID_IIRDES_SOS, order,
+                    static_cast<float>(cutoffNorm), 0.0f, 0.1f, 60.0f);
+                size_t lpfSettle = static_cast<size_t>(
+                    std::min<double>(2.0 * order / cutoffNorm, 50000.0));
+                if (lpfSettle > lenEff) lpfSettle = lenEff;
+                std::vector<float> ext(2 * lpfSettle + lenEff);
+                const float first = demod[0];
+                const float last  = demod[lenEff - 1];
+                for (size_t i = 0; i < lpfSettle; ++i) ext[i] = first;
+                std::memcpy(ext.data() + lpfSettle, demod.data(),
+                            lenEff * sizeof(float));
+                for (size_t i = 0; i < lpfSettle; ++i) {
+                    ext[lpfSettle + lenEff + i] = last;
+                }
+                iirfilt_rrrf_reset(iir);
+                for (size_t i = 0; i < ext.size(); ++i) {
+                    iirfilt_rrrf_execute(iir, ext[i], &ext[i]);
+                }
+                iirfilt_rrrf_reset(iir);
+                for (size_t i = 0; i < ext.size(); ++i) {
+                    const size_t j = ext.size() - 1 - i;
+                    iirfilt_rrrf_execute(iir, ext[j], &ext[j]);
+                }
+                std::memcpy(demod.data(), ext.data() + lpfSettle,
+                            lenEff * sizeof(float));
+                iirfilt_rrrf_destroy(iir);
             }
-            iirfilt_rrrf_reset(postIir_);
-            for (size_t i = 0; i < ext.size(); ++i) {
-                const size_t j = ext.size() - 1 - i;
-                iirfilt_rrrf_execute(postIir_, ext[j], &ext[j]);
-            }
-            // Copy back just the data portion — both pads are discarded.
-            std::memcpy(demod.data(), ext.data() + leftPad,
-                        batchLen * sizeof(float));
         }
-        // No cold-start NaN window in batched mode: the bilateral pad
-        // above means sample 0 of the file is just as settled as any
-        // other sample, so there's nothing to hide.
+    }
+
+    // Hold-expand to batchLen if we decimated. Each output sample of `demod`
+    // becomes `decim` consecutive samples of the cached buffer. Output rate
+    // stays at fs so downstream sample indexing is undisturbed.
+    std::vector<float> expanded;
+    if (decim > 1 && lenEff > 0) {
+        expanded.resize(batchLen);
+        for (size_t i = 0; i < batchLen; ++i) {
+            size_t srcIdx = i / static_cast<size_t>(decim);
+            if (srcIdx >= lenEff) srcIdx = lenEff - 1;
+            expanded[i] = demod[srcIdx];
+        }
+        demod = std::move(expanded);
+    } else if (decim > 1) {
+        // Empty batch → zeros (shouldn't happen given batchLen > 0).
+        demod.assign(batchLen, 0.0f);
     }
 
     batchCache_.startSample = start;
@@ -510,40 +577,50 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     batchCache_.cutoffHz    = cutoffHz;
     batchCache_.rate        = fs;
     batchCache_.cheap       = cheap;
+    batchCache_.decim       = decim;
 
     FmLog::instance().writef(
-        "fillBatchCache: method=%s cutoffHz=%.3f start=%zu len=%zu (covering "
-        "request [%zu, %zu))\n",
-        methodName(static_cast<int>(method)), cutoffHz, start, batchLen,
+        "fillBatchCache: method=%s cutoffHz=%.3f decim=%d fsEff=%.0f "
+        "start=%zu len=%zu lenEff=%zu (covering request [%zu, %zu))\n",
+        methodName(static_cast<int>(method)), cutoffHz, decim, fsEff,
+        start, batchLen, lenEff,
         needStart, needEnd);
     return true;
 }
 
 std::unique_ptr<float[]> FrequencyDemod::getSamples(size_t start, size_t length)
 {
-    // Snapshot the current method under the main mutex so we can decide
-    // which path to take without holding it through the slow filter run.
+    // Snapshot under the main mutex so we can decide which path to take
+    // without holding it through the slow filter run.
     LpfMethod method;
     double    cutoffHz;
+    int       decim;
     {
         QMutexLocker ml(&mutex);
         method   = postLpfMethod_;
         cutoffHz = postLpfCutoffHz_;
+        decim    = predemodDecim_;
     }
 
-    // Kaiser FIR (or "no LPF" / cheap mode without LPF) is composable
-    // across tile boundaries — fall through to the standard SampleBuffer
-    // pattern, which has the parallel-friendly per-tile work() path.
-    if (method == LpfMethod::KaiserFir || cutoffHz <= 0.0) {
+    // Fall through to the per-tile SampleBuffer path only when (a) Kaiser
+    // FIR is selected (composable across tile boundaries → fine in
+    // parallel) OR there's no LPF, AND (b) pre-demod decimation is off.
+    // The decimated path always batches because the IQ has to be
+    // resampled in one go for the multistage halfband filter to be valid.
+    const bool canUsePerTile =
+        (method == LpfMethod::KaiserFir || cutoffHz <= 0.0) && decim <= 1;
+    if (canUsePerTile) {
         return SampleBuffer::getSamples(start, length);
     }
 
-    // IIR backends: serve from the batch cache so all tiles in the same
-    // view slice from a single continuous filtfilt pass.
+    // Serve from the batch cache so all tiles in the same view slice from
+    // a single continuous filtfilt (and a single decimator+demod when
+    // pre-demod decimation is enabled).
     QMutexLocker ml(&batchMutex_);
     const bool covers = batchCache_.valid &&
                         batchCache_.method   == method &&
                         batchCache_.cutoffHz == cutoffHz &&
+                        batchCache_.decim    == decim &&
                         start >= batchCache_.startSample &&
                         (start + length) <=
                             (batchCache_.startSample + batchCache_.length);

@@ -65,6 +65,7 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmLpfChanged, plots, &PlotView::setFmLpfCutoff);
     connect(dock, &SpectrogramControls::fmLpfMethodChanged, plots, &PlotView::setFmLpfMethod);
     connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
+    connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

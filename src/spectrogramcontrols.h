@@ -53,6 +53,9 @@ signals:
     void fmLpfMethodChanged(int method);
     // Block-averaging decimation factor applied after the FM demod. 1 = disabled.
     void fmDecimChanged(int n);
+    // Pre-demod IQ decimation factor (1 = off). When set the FM demod
+    // chain runs at Fs/M (IQEngine pattern).
+    void fmPredemodDecimChanged(int m);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -105,4 +108,6 @@ public:
     QLineEdit  *fmLpfLineEdit;
     // FM post-demod block-average decimation factor (1 disables)
     QSpinBox   *fmDecimSpinBox;
+    // FM pre-demod IQ decimation (1 disables)
+    QSpinBox   *fmPredemodDecimSpinBox;
 };

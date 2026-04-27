@@ -132,6 +132,21 @@ void PlotView::setFmLpfMethod(int method)
     viewport()->update();
 }
 
+void PlotView::setFmPredemodDecimation(int m)
+{
+    if (m < 1) m = 1;
+    fmPredemodDecim = m;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPredemodDecimation(m);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
@@ -145,6 +160,7 @@ void PlotView::addPlot(Plot *plot)
             fd->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
             fd->setPostLpfCutoff(fmLpfCutoffHz);
             fd->setPostDecimation(fmDecim);
+            fd->setPredemodDecimation(fmPredemodDecim);
         }
     }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);

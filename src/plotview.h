@@ -77,6 +77,8 @@ public slots:
     void setFmLpfMethod(int method);
     // Block-average decimation factor on every FM plot. 1 disables.
     void setFmDecimation(int n);
+    // Pre-demod IQ decimation factor (1 = off).
+    void setFmPredemodDecimation(int m);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -128,4 +130,5 @@ private:
     double fmLpfCutoffHz = 0.0;
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
     int    fmDecim = 1;
+    int    fmPredemodDecim = 1;
 };
