@@ -73,6 +73,8 @@ public slots:
     void setMaxThreads(int threads);
     // Cutoff (Hz) for the post-demod LPF on every FM plot. 0 disables.
     void setFmLpfCutoff(double hz);
+    // LPF backend (matches FrequencyDemod::LpfMethod).
+    void setFmLpfMethod(int method);
     // Block-average decimation factor on every FM plot. 1 disables.
     void setFmDecimation(int n);
 
@@ -124,5 +126,6 @@ private:
     int derivedPlotHeight;
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
+    int    fmLpfMethod = 2; // FrequencyDemod::LpfMethod::EllipticIir
     int    fmDecim = 1;
 };

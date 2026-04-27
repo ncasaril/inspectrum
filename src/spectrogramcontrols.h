@@ -26,6 +26,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QLabel>
 
 class SpectrogramControls : public QDockWidget
@@ -48,6 +49,8 @@ signals:
     void threadsChanged(int threads);
     // Post-demod LPF cutoff (Hz) applied to all frequency plots. 0 = disabled.
     void fmLpfChanged(double hz);
+    // Post-demod LPF implementation (matches FrequencyDemod::LpfMethod).
+    void fmLpfMethodChanged(int method);
     // Block-averaging decimation factor applied after the FM demod. 1 = disabled.
     void fmDecimChanged(int n);
 
@@ -96,6 +99,8 @@ public:
      * Spinbox to select number of threads for concurrent tasks.
      */
     QSpinBox   *threadCountSpinBox;
+    // FM post-demod LPF implementation (Kaiser FIR / Butterworth IIR / Elliptic IIR)
+    QComboBox  *fmLpfMethodCombo;
     // FM post-demod LPF cutoff in Hz (0 disables)
     QLineEdit  *fmLpfLineEdit;
     // FM post-demod block-average decimation factor (1 disables)

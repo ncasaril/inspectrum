@@ -46,7 +46,7 @@ FrequencyDemod::FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>
 
 FrequencyDemod::~FrequencyDemod()
 {
-    if (postLpf_) iirfilt_rrrf_destroy(postLpf_);
+    destroyPostLpf();
     freqdem_destroy(fdem_);
 }
 
@@ -70,6 +70,17 @@ void FrequencyDemod::setPostLpfCutoff(double hz)
     invalidate();
 }
 
+void FrequencyDemod::setPostLpfMethod(LpfMethod m)
+{
+    {
+        QMutexLocker ml(&mutex);
+        if (m == postLpfMethod_) return;
+        postLpfMethod_ = m;
+        rebuildPostLpf(); // assumes mutex held
+    }
+    invalidate();
+}
+
 void FrequencyDemod::setPostDecimation(int n)
 {
     if (n < 1) n = 1;
@@ -81,61 +92,95 @@ void FrequencyDemod::setPostDecimation(int n)
     invalidate();
 }
 
+void FrequencyDemod::destroyPostLpf()
+{
+    if (postFir_) { firfilt_rrrf_destroy(postFir_); postFir_ = nullptr; }
+    if (postIir_) { iirfilt_rrrf_destroy(postIir_); postIir_ = nullptr; }
+    postLpfLen_ = 0;
+    lpfSettleSamples_ = 0;
+}
+
 void FrequencyDemod::rebuildPostLpf()
 {
-    if (postLpf_) {
-        iirfilt_rrrf_destroy(postLpf_);
-        postLpf_ = nullptr;
-        postLpfLen_ = 0;
-        lpfSettleSamples_ = 0;
-    }
+    destroyPostLpf();
     postLpfBuiltAtRate_ = rate();
     if (postLpfCutoffHz_ <= 0.0 || postLpfBuiltAtRate_ <= 0.0) return;
 
-    // Normalized cutoff (Fs = 1). Clamp away from 0 and 0.5 to keep the
-    // Butterworth design well-conditioned.
+    // Normalized cutoff (Fs = 1). Clamp away from 0 and 0.5 so every
+    // backend's design path stays well-conditioned.
     double cutoff = postLpfCutoffHz_ / postLpfBuiltAtRate_;
     if (cutoff >= 0.499) cutoff = 0.499;
     if (cutoff <= 1e-6)  cutoff = 1e-6;
 
-    // Elliptic IIR (cascaded SOS): closest IIR shape to a Kaiser FIR's brick
-    // wall — sharp transition with bounded passband / stopband ripple. Order
-    // 8 gives a transition width comparable to a long Kaiser FIR at a tiny
-    // fraction of the per-sample cost. SOS formatting keeps coefficients
-    // numerically well-conditioned at low normalized cutoffs.
-    const unsigned int order = 8;
-    const float Ap = 0.1f;   // passband ripple (dB)
-    const float As = 60.0f;  // stopband attenuation (dB)
-    postLpf_ = iirfilt_rrrf_create_prototype(
-        LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
-        order, static_cast<float>(cutoff), 0.0f, Ap, As);
-
-    // Step-response settling for an Nth-order IIR lowpass scales as
-    // ~1.6·N / cutoff_norm samples to reach ~60 dB below peak ringing.
-    // Elliptic equiripple stopband can keep ringing past this nominal time,
-    // so add a 2× safety factor — the cold-start NaN window has to fully
-    // cover the transient or the auto-scaling y-axis chases the residual
-    // overshoot peaks at the start of the visible range. Cap the result so
-    // sub-Hz cutoffs don't try to allocate gigabytes of upstream lead-in.
-    constexpr size_t kSettleCap = 500000;
-    double settle = 3.2 * order / cutoff;
-    if (settle > kSettleCap) settle = kSettleCap;
-    lpfSettleSamples_ = static_cast<size_t>(settle);
-    // postLpfLen_ feeds into historySize() so SampleBuffer fetches enough
-    // upstream lead-in to consume the IIR transient before the returned
-    // output begins.
-    postLpfLen_ = lpfSettleSamples_;
+    switch (postLpfMethod_) {
+    case LpfMethod::KaiserFir: {
+        // Reference linear-phase FIR. Tap count from liquid's estimator at
+        // 60 dB stopband — this can be tens of thousands of taps for narrow
+        // cutoffs (slow, but the most accurate option).
+        const float atten = 60.0f;
+        unsigned int len = estimate_req_filter_len(std::max(cutoff, 1e-4), atten);
+        if (len < 3) len = 3;
+        std::vector<float> taps(len);
+        liquid_firdes_kaiser(len, static_cast<float>(cutoff), atten, 0.0f, taps.data());
+        postFir_ = firfilt_rrrf_create(taps.data(), len);
+        // FIR is linear-phase; the impulse fully fits in `len` samples, so
+        // the lead-in / cold-start window is just the tap count.
+        postLpfLen_ = len;
+        lpfSettleSamples_ = len;
+        break;
+    }
+    case LpfMethod::ButterworthIir: {
+        // Cheap maximally-flat IIR. ~36 dB/octave at order 6, no ripple.
+        // Settles much faster than elliptic for the same order because the
+        // step response has no equiripple tail.
+        const unsigned int order = 6;
+        postIir_ = iirfilt_rrrf_create_lowpass(order, static_cast<float>(cutoff));
+        constexpr size_t kSettleCap = 500000;
+        double settle = 2.0 * order / cutoff;
+        if (settle > kSettleCap) settle = kSettleCap;
+        lpfSettleSamples_ = static_cast<size_t>(settle);
+        postLpfLen_ = lpfSettleSamples_;
+        break;
+    }
+    case LpfMethod::EllipticIir: {
+        // Sharpest IIR transition for the order, at the cost of equiripple
+        // passband / stopband. Cascaded SOS keeps coefficients numerically
+        // well-conditioned at low normalized cutoffs.
+        const unsigned int order = 8;
+        const float Ap = 0.1f;   // passband ripple (dB)
+        const float As = 60.0f;  // stopband attenuation (dB)
+        postIir_ = iirfilt_rrrf_create_prototype(
+            LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
+            order, static_cast<float>(cutoff), 0.0f, Ap, As);
+        // Equiripple stopband leaves a slowly-decaying tail past the nominal
+        // 1.6·N/cutoff_norm; double it so the cold-start NaN window covers
+        // the actual ringing rather than chasing residual peaks.
+        constexpr size_t kSettleCap = 500000;
+        double settle = 3.2 * order / cutoff;
+        if (settle > kSettleCap) settle = kSettleCap;
+        lpfSettleSamples_ = static_cast<size_t>(settle);
+        postLpfLen_ = lpfSettleSamples_;
+        break;
+    }
+    }
 }
 
 void FrequencyDemod::applyPostLpf(float *out, int count)
 {
-    if (!postLpf_) return;
     // Reset state each call: getSamples ranges can be non-contiguous. The
-    // SampleBuffer lead-in re-warms the IIR within ~order samples, so the
-    // 64-sample historySize() leeway is plenty.
-    iirfilt_rrrf_reset(postLpf_);
-    for (int i = 0; i < count; ++i) {
-        iirfilt_rrrf_execute(postLpf_, out[i], &out[i]);
+    // SampleBuffer lead-in (sized via postLpfLen_) re-warms the filter
+    // before the first returned sample.
+    if (postFir_) {
+        firfilt_rrrf_reset(postFir_);
+        for (int i = 0; i < count; ++i) {
+            firfilt_rrrf_push(postFir_, out[i]);
+            firfilt_rrrf_execute(postFir_, &out[i]);
+        }
+    } else if (postIir_) {
+        iirfilt_rrrf_reset(postIir_);
+        for (int i = 0; i < count; ++i) {
+            iirfilt_rrrf_execute(postIir_, out[i], &out[i]);
+        }
     }
 }
 
@@ -171,7 +216,8 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
     // Lazy build of the post-demod LPF: the upstream sample rate is often not
     // set at construction time (file opens after the chain is built), so the
     // filter is rebuilt here whenever Fs changes and a cutoff is configured.
-    if (postLpfCutoffHz_ > 0.0 && (!postLpf_ || postLpfBuiltAtRate_ != rate())) {
+    const bool haveLpf = (postFir_ || postIir_);
+    if (postLpfCutoffHz_ > 0.0 && (!haveLpf || postLpfBuiltAtRate_ != rate())) {
         rebuildPostLpf();
     }
 

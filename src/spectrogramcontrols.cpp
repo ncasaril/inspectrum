@@ -128,6 +128,17 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("Threads:")), threadCountSpinBox);
     connect(threadCountSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::threadsChanged);
+    // FM post-demod LPF method. Kept as a picker so the slow-but-accurate
+    // Kaiser FIR is still available for A/B comparison against the IIR
+    // alternatives. Order here must match FrequencyDemod::LpfMethod.
+    fmLpfMethodCombo = new QComboBox(widget);
+    fmLpfMethodCombo->addItem(tr("Kaiser FIR (slow)"));
+    fmLpfMethodCombo->addItem(tr("Butterworth IIR"));
+    fmLpfMethodCombo->addItem(tr("Elliptic IIR"));
+    fmLpfMethodCombo->setCurrentIndex(2); // default = Elliptic, matches demod default
+    layout->addRow(new QLabel(tr("FM LPF method:")), fmLpfMethodCombo);
+    connect(fmLpfMethodCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::fmLpfMethodChanged);
     // FM post-demod LPF cutoff (Hz). 0 = disabled.
     fmLpfLineEdit = new QLineEdit(widget);
     auto fmLpfValidator = new QDoubleValidator(0.0, 1e9, 3, this);

@@ -25,6 +25,16 @@
 class FrequencyDemod : public SampleBuffer<std::complex<float>, float>
 {
 public:
+    // Available post-demod LPF implementations. KaiserFir is the original
+    // (linear-phase, accurate, but very slow at narrow cutoffs);
+    // ButterworthIir and EllipticIir are cheap-per-sample IIR alternatives.
+    // Kept selectable so the user can A/B against the reference.
+    enum class LpfMethod {
+        KaiserFir = 0,
+        ButterworthIir = 1,
+        EllipticIir = 2,
+    };
+
     FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src);
     virtual ~FrequencyDemod();
     void work(void *input, void *output, int count, size_t sampleid) override;
@@ -34,6 +44,8 @@ public:
     void setCheapDemod(bool enabled) { cheapMode_ = enabled; }
     // Post-demod LPF cutoff in Hz. 0 disables the filter.
     void setPostLpfCutoff(double hz);
+    // Select which LPF implementation to use.
+    void setPostLpfMethod(LpfMethod m);
     // Block-averaging decimation on the post-demod stream. N=1 disables.
     void setPostDecimation(int n);
 
@@ -47,21 +59,23 @@ private:
     // Fast instantaneous-frequency demod (phase difference) instead of full FIR
     bool         cheapMode_ = false;
     // Post-demod LPF (built lazily when the upstream sample rate is known).
-    // IIR Butterworth — fast at any cutoff, short impulse response (a few
-    // samples). Order 6 ≈ 36 dB/octave which is plenty for FM noise cleanup
-    // and avoids the huge tap count a Kaiser FIR would need at low Fc.
+    // Two backends are supported — exactly one of postFir_/postIir_ is non-null
+    // at a time depending on postLpfMethod_.
     double       postLpfCutoffHz_ = 0.0;
-    iirfilt_rrrf postLpf_ = nullptr;
+    LpfMethod    postLpfMethod_ = LpfMethod::EllipticIir;
+    firfilt_rrrf postFir_ = nullptr;
+    iirfilt_rrrf postIir_ = nullptr;
     size_t       postLpfLen_ = 0;
-    // Number of samples the IIR needs to settle from a cold-start. Scales
-    // with 1/cutoff_norm (narrow filter → longer settle); used to size both
-    // SampleBuffer's history and the cold-start NaN-mark window.
+    // Number of samples the LPF needs to settle from a cold-start. For FIR
+    // this is the tap count; for IIR it scales with 1/cutoff_norm. Used to
+    // size both SampleBuffer's history and the cold-start NaN-mark window.
     size_t       lpfSettleSamples_ = 0;
-    // Cached sample rate used to build postLpf_; rebuilds when it changes.
+    // Cached sample rate used to build the LPF; rebuilds when it changes.
     double       postLpfBuiltAtRate_ = 0.0;
     // Post-demod block-average decimation. 1 = disabled.
     int          postDecim_ = 1;
 
+    void destroyPostLpf();
     void rebuildPostLpf();
     void applyPostLpf(float *out, int count);
     void applyPostDecimation(float *out, int count, size_t sampleid);

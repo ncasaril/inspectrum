@@ -117,6 +117,21 @@ void PlotView::setFmDecimation(int n)
     viewport()->update();
 }
 
+void PlotView::setFmLpfMethod(int method)
+{
+    fmLpfMethod = method;
+    auto m = static_cast<FrequencyDemod::LpfMethod>(method);
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostLpfMethod(m);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
@@ -127,6 +142,7 @@ void PlotView::addPlot(Plot *plot)
     // Propagate the currently-configured FM settings to any newly added FM plot.
     if (auto tp = dynamic_cast<TracePlot*>(plot)) {
         if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            fd->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
             fd->setPostLpfCutoff(fmLpfCutoffHz);
             fd->setPostDecimation(fmDecim);
         }
