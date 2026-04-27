@@ -252,28 +252,6 @@ void FrequencyDemod::rebuildPostLpf()
         postLpfLen_ = lpfSettleSamples_;
         break;
     }
-    case LpfMethod::EllipticIir: {
-        // Sharpest IIR transition for the order, at the cost of equiripple
-        // passband / stopband. Cascaded SOS keeps coefficients numerically
-        // well-conditioned at low normalized cutoffs.
-        const unsigned int order = 8;
-        const float Ap = 0.1f;   // passband ripple (dB)
-        const float As = 60.0f;  // stopband attenuation (dB)
-        postIir_ = iirfilt_rrrf_create_prototype(
-            LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
-            order, static_cast<float>(cutoff), 0.0f, Ap, As);
-        // Filtfilt squares the magnitude response — the equiripple stopband
-        // ripple becomes ripple² (much smaller in linear scale). The earlier
-        // 3.2·N/cutoff_norm factor was sized for single-pass Elliptic where
-        // stopband residue rang for thousands of samples; with filtfilt the
-        // tail is much shorter, so 1.6·N/cutoff_norm is enough.
-        constexpr size_t kSettleCap = 500000;
-        double settle = 1.6 * order / cutoff;
-        if (settle > kSettleCap) settle = kSettleCap;
-        lpfSettleSamples_ = static_cast<size_t>(settle);
-        postLpfLen_ = lpfSettleSamples_;
-        break;
-    }
     }
 
     FmLog::instance().writef(
@@ -476,39 +454,52 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
                 }
             }
         } else if (postIir_) {
-            // Forward pass over the entire batch.
-            iirfilt_rrrf_reset(postIir_);
-            for (size_t i = 0; i < batchLen; ++i) {
-                iirfilt_rrrf_execute(postIir_, demod[i], &demod[i]);
+            // Filtfilt with bilateral constant padding. The forward pass
+            // cold-starts at the *start* of the buffer (state = 0); we pad
+            // the left with `first_sample` so the forward filter settles
+            // to that constant in the pad, then enters the data already
+            // matched at the boundary. The reverse pass cold-starts at the
+            // *end* of the buffer; we pad the right with the *forward
+            // pass*'s last output value (after running forward) so the
+            // reverse filter settles to that constant in its pad, then
+            // enters the data with the right initial conditions.
+            //
+            // Net result: the entire data region is fully settled for both
+            // passes — no NaN cold-start window needed at the start of the
+            // file, no boundary transients anywhere.
+            const size_t leftPad  = std::min<size_t>(settle, batchLen);
+            const size_t rightPad = std::min<size_t>(settle, batchLen);
+            std::vector<float> ext(leftPad + batchLen + rightPad);
+            const float first = batchLen > 0 ? demod[0] : 0.0f;
+            for (size_t i = 0; i < leftPad; ++i) ext[i] = first;
+            std::memcpy(ext.data() + leftPad, demod.data(),
+                        batchLen * sizeof(float));
+            // Right pad gets the data's last value before forward pass.
+            // The forward pass will smooth its output across the
+            // pad/data boundary; the *output* in the right pad ends up
+            // at whatever the filter settled to over the data, which is
+            // exactly what we want as the reverse pass's seed.
+            const float last = batchLen > 0 ? demod[batchLen - 1] : 0.0f;
+            for (size_t i = 0; i < rightPad; ++i) {
+                ext[leftPad + batchLen + i] = last;
             }
-            // Constant-pad on the right with the last forward-output value
-            // so the reverse pass cold-start happens in a benign region
-            // and settles to the same DC the data ends at.
-            const size_t pad = std::min<size_t>(settle, batchLen);
-            std::vector<float> tail(pad, demod.empty() ? 0.0f : demod.back());
-            // Reverse pass: pad first, then data, in reverse time order.
-            iirfilt_rrrf_reset(postIir_);
-            for (size_t i = 0; i < pad; ++i) {
-                float dummy;
-                iirfilt_rrrf_execute(postIir_, tail[i], &dummy);
-            }
-            for (size_t i = 0; i < batchLen; ++i) {
-                const size_t j = batchLen - 1 - i;
-                iirfilt_rrrf_execute(postIir_, demod[j], &demod[j]);
-            }
-        }
 
-        // Cold-start NaN mask: the file's first lpfSettleSamples_ are
-        // forward-pass transient and shouldn't bias the auto-scaling scan.
-        // Apply it in absolute (file-relative) coordinates so the same
-        // samples are masked regardless of which batch contains them.
-        const size_t coldStart = std::max<size_t>(512, settle);
-        if (start < coldStart) {
-            const size_t bad = std::min(coldStart - start, batchLen);
-            for (size_t i = 0; i < bad; ++i) {
-                demod[i] = std::numeric_limits<float>::quiet_NaN();
+            iirfilt_rrrf_reset(postIir_);
+            for (size_t i = 0; i < ext.size(); ++i) {
+                iirfilt_rrrf_execute(postIir_, ext[i], &ext[i]);
             }
+            iirfilt_rrrf_reset(postIir_);
+            for (size_t i = 0; i < ext.size(); ++i) {
+                const size_t j = ext.size() - 1 - i;
+                iirfilt_rrrf_execute(postIir_, ext[j], &ext[j]);
+            }
+            // Copy back just the data portion — both pads are discarded.
+            std::memcpy(demod.data(), ext.data() + leftPad,
+                        batchLen * sizeof(float));
         }
+        // No cold-start NaN window in batched mode: the bilateral pad
+        // above means sample 0 of the file is just as settled as any
+        // other sample, so there's nothing to hide.
     }
 
     batchCache_.startSample = start;

@@ -28,14 +28,16 @@
 class FrequencyDemod : public SampleBuffer<std::complex<float>, float>
 {
 public:
-    // Available post-demod LPF implementations. KaiserFir is the original
-    // (linear-phase, accurate, but very slow at narrow cutoffs);
-    // ButterworthIir and EllipticIir are cheap-per-sample IIR alternatives.
-    // Kept selectable so the user can A/B against the reference.
+    // Available post-demod LPF implementations. KaiserFir is the
+    // linear-phase reference (accurate, slow at narrow cutoffs);
+    // ButterworthIir is a cheap-per-sample IIR run as filtfilt over a
+    // batched window for zero-phase response. (Elliptic was dropped:
+    // order-8 equiripple at fc/fs ≤ 1e-3 is numerically marginal in
+    // float32 and the long impulse autocorrelation through filtfilt
+    // produces visible ringing that no amount of padding hides.)
     enum class LpfMethod {
         KaiserFir = 0,
         ButterworthIir = 1,
-        EllipticIir = 2,
     };
 
     FrequencyDemod(std::shared_ptr<SampleSource<std::complex<float>>> src);

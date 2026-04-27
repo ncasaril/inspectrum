@@ -134,7 +134,6 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     fmLpfMethodCombo = new QComboBox(widget);
     fmLpfMethodCombo->addItem(tr("Kaiser FIR"));
     fmLpfMethodCombo->addItem(tr("Butterworth IIR (filtfilt)"));
-    fmLpfMethodCombo->addItem(tr("Elliptic IIR (filtfilt)"));
     fmLpfMethodCombo->setCurrentIndex(0); // default = Kaiser FIR (linear-phase, accurate)
     layout->addRow(new QLabel(tr("FM LPF method:")), fmLpfMethodCombo);
     connect(fmLpfMethodCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
