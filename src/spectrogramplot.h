@@ -50,6 +50,11 @@ public:
     std::shared_ptr<SampleSource<std::complex<float>>> input() { return inputSource; };
     void setSampleRate(double sampleRate);
     bool tunerEnabled();
+    // Move the tuner so its centre frequency matches the given y-coordinate
+    // in plot pixels (top of plot = 0, bottom = height()). Used by the right-
+    // click "Add derived plot" menu so the new plot tunes to where the user
+    // clicked instead of leaving the tuner at its previous position.
+    void setTunerCentreY(int y);
     void enableScales(bool enabled);
     void enableAnnotations(bool enabled);
     void enableAnnoLabels(bool enabled);

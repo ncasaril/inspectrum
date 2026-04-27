@@ -214,6 +214,9 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
 
     Plot *selectedPlot = nullptr;
     size_t plotIndex = 0;
+    // Tuner Y for any new derived plot: -1 means "leave tuner alone" (e.g.
+    // the click was in an existing derived plot, not the spectrogram).
+    int tunerCentreY = -1;
     // Check if click is in derived plot area (fixed at bottom)
     if (plots.size() > 1 && clickY >= viewportH - derivedPlotHeight) {
         int posInDerived = clickY - (viewportH - derivedPlotHeight);
@@ -228,6 +231,7 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
             return;
         plotIndex = 0;
         selectedPlot = plots[0].get();
+        tunerCentreY = contentY;
     }
 
     // Compute center position for recentering
@@ -245,6 +249,10 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         connect(
             trioAction, &QAction::triggered,
             this, [=]() {
+                // Tune the spectrogram tuner to the click position so the
+                // new derived plots see the signal under the cursor.
+                if (tunerCentreY >= 0)
+                    spectrogramPlot->setTunerCentreY(tunerCentreY);
                 // Order: sample (IQ) first, amplitude (AM) second, frequency (FM) last
                 addPlot(Plots::samplePlot(src));
                 addPlot(Plots::amplitudePlot(src));
@@ -264,6 +272,11 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         connect(
             action, &QAction::triggered,
             this, [=]() {
+                // Tune the spectrogram tuner to the click Y first; the new
+                // plot subscribes to tunerTransform so it picks up the new
+                // centre frequency on its first paint.
+                if (tunerCentreY >= 0)
+                    spectrogramPlot->setTunerCentreY(tunerCentreY);
                 // Add the new derived plot
                 addPlot(plotCreator(src));
                 // Re-center view so clickSample is at center

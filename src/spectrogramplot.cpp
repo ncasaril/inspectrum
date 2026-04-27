@@ -453,6 +453,16 @@ bool SpectrogramPlot::tunerEnabled()
     return (tunerTransform->subscriberCount() > 0);
 }
 
+void SpectrogramPlot::setTunerCentreY(int y)
+{
+    // Clamp into the plot so the cursors stay visible. The tuner uses
+    // [0..height()] in plot pixels; freq mapping is in getTunerPhaseInc().
+    if (y < 0) y = 0;
+    if (y > height()) y = height();
+    tuner.setCentre(y);
+    tunerMoved();
+}
+
 void SpectrogramPlot::tunerMoved()
 {
     tunerTransform->setFrequency(getTunerPhaseInc());
