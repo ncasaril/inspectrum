@@ -210,8 +210,12 @@ void FrequencyDemod::rebuildPostLpf()
         postIir_ = iirfilt_rrrf_create_prototype(
             LIQUID_IIRDES_BUTTER, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
             order, static_cast<float>(cutoff), 0.0f, 0.1f, 60.0f);
+        // Filtfilt squares the magnitude response so stopband attenuation
+        // doubles in dB, which reduces overshoot and lets us shrink the
+        // settle budget vs single-pass. 1.0·N/cutoff_norm is empirically
+        // enough for Butterworth (no equiripple tail).
         constexpr size_t kSettleCap = 500000;
-        double settle = 2.0 * order / cutoff;
+        double settle = 1.0 * order / cutoff;
         if (settle > kSettleCap) settle = kSettleCap;
         lpfSettleSamples_ = static_cast<size_t>(settle);
         postLpfLen_ = lpfSettleSamples_;
@@ -227,11 +231,13 @@ void FrequencyDemod::rebuildPostLpf()
         postIir_ = iirfilt_rrrf_create_prototype(
             LIQUID_IIRDES_ELLIP, LIQUID_IIRDES_LOWPASS, LIQUID_IIRDES_SOS,
             order, static_cast<float>(cutoff), 0.0f, Ap, As);
-        // Equiripple stopband leaves a slowly-decaying tail past the nominal
-        // 1.6·N/cutoff_norm; double it so the cold-start NaN window covers
-        // the actual ringing rather than chasing residual peaks.
+        // Filtfilt squares the magnitude response — the equiripple stopband
+        // ripple becomes ripple² (much smaller in linear scale). The earlier
+        // 3.2·N/cutoff_norm factor was sized for single-pass Elliptic where
+        // stopband residue rang for thousands of samples; with filtfilt the
+        // tail is much shorter, so 1.6·N/cutoff_norm is enough.
         constexpr size_t kSettleCap = 500000;
-        double settle = 3.2 * order / cutoff;
+        double settle = 1.6 * order / cutoff;
         if (settle > kSettleCap) settle = kSettleCap;
         lpfSettleSamples_ = static_cast<size_t>(settle);
         postLpfLen_ = lpfSettleSamples_;
@@ -268,28 +274,40 @@ void FrequencyDemod::applyPostLpf(float *out, int count)
     //
     // Forward pass uses the leading SampleBuffer history to warm up. Reverse
     // pass starts at the right-hand edge of the buffer and would corrupt the
-    // last lpfSettleSamples_ samples of every tile if run directly. Pad the
-    // right with edge-reflected samples (matches scipy.signal.filtfilt's
-    // default) so the reverse pass cold-start happens in the pad region and
-    // the real data is fully settled by the time it's reached.
+    // last lpfSettleSamples_ samples of every tile if run directly. The trick
+    // is to pad on the right so the reverse-pass cold-start happens in the
+    // pad region. Pad order matters here:
+    //
+    //   1) Forward pass over [data] → forward_out (smoothed; spikes already
+    //      attenuated by the LPF).
+    //   2) Pad with the LAST forward-output value held constant. Reverse pass
+    //      starts in this constant region; with a unity-DC-gain filter and
+    //      zero initial state it settles to that constant within
+    //      lpfSettleSamples_ samples, matches the data boundary exactly,
+    //      and continues into the data with no transient.
+    //
+    // (Earlier: odd-reflection of the raw freqdem output. That gave wild pad
+    //  values whenever a spike landed near the right edge — e.g. a sample at
+    //  1.02 next to data at 0.018 reflected to -0.99 — which made the reverse
+    //  pass start chasing a non-physical level and bias the visible region.)
     const int pad = std::min<int>(static_cast<int>(lpfSettleSamples_),
                                   std::max(count, 1));
     std::vector<float> buf(static_cast<size_t>(count) + pad);
     std::memcpy(buf.data(), out, count * sizeof(float));
-    if (pad > 0 && count > 0) {
-        // Odd reflection around the last sample: 2*last - x[count-2-i].
-        // Avoids introducing a step at the boundary that would itself ring.
-        const float last = out[count - 1];
-        for (int i = 0; i < pad; ++i) {
-            const int src = (count - 2 - i >= 0) ? (count - 2 - i) : 0;
-            buf[count + i] = 2.0f * last - out[src];
-        }
-    }
 
+    // Forward pass over the data portion only.
     iirfilt_rrrf_reset(postIir_);
-    for (size_t i = 0; i < buf.size(); ++i) {
+    for (int i = 0; i < count; ++i) {
         iirfilt_rrrf_execute(postIir_, buf[i], &buf[i]);
     }
+    // Constant pad with the last forward-output sample so the reverse-pass
+    // cold-start has a smooth, in-range value to settle to.
+    if (pad > 0 && count > 0) {
+        const float last = buf[count - 1];
+        for (int i = 0; i < pad; ++i) buf[count + i] = last;
+    }
+    // Reverse pass over [data | constant pad]. Cold-start happens in the pad
+    // region; by the time the pass reaches the data it's settled.
     iirfilt_rrrf_reset(postIir_);
     for (size_t i = 0; i < buf.size(); ++i) {
         const size_t j = buf.size() - 1 - i;
