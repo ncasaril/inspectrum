@@ -62,7 +62,7 @@ private:
     // Two backends are supported — exactly one of postFir_/postIir_ is non-null
     // at a time depending on postLpfMethod_.
     double       postLpfCutoffHz_ = 0.0;
-    LpfMethod    postLpfMethod_ = LpfMethod::EllipticIir;
+    LpfMethod    postLpfMethod_ = LpfMethod::KaiserFir;
     firfilt_rrrf postFir_ = nullptr;
     iirfilt_rrrf postIir_ = nullptr;
     size_t       postLpfLen_ = 0;

@@ -132,10 +132,10 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     // Kaiser FIR is still available for A/B comparison against the IIR
     // alternatives. Order here must match FrequencyDemod::LpfMethod.
     fmLpfMethodCombo = new QComboBox(widget);
-    fmLpfMethodCombo->addItem(tr("Kaiser FIR (slow)"));
-    fmLpfMethodCombo->addItem(tr("Butterworth IIR"));
-    fmLpfMethodCombo->addItem(tr("Elliptic IIR"));
-    fmLpfMethodCombo->setCurrentIndex(2); // default = Elliptic, matches demod default
+    fmLpfMethodCombo->addItem(tr("Kaiser FIR"));
+    fmLpfMethodCombo->addItem(tr("Butterworth IIR (fast, distorts shape)"));
+    fmLpfMethodCombo->addItem(tr("Elliptic IIR (fast, distorts shape)"));
+    fmLpfMethodCombo->setCurrentIndex(0); // default = Kaiser FIR (linear-phase, accurate)
     layout->addRow(new QLabel(tr("FM LPF method:")), fmLpfMethodCombo);
     connect(fmLpfMethodCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &SpectrogramControls::fmLpfMethodChanged);

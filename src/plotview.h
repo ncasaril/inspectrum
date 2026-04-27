@@ -126,6 +126,6 @@ private:
     int derivedPlotHeight;
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
-    int    fmLpfMethod = 2; // FrequencyDemod::LpfMethod::EllipticIir
+    int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
     int    fmDecim = 1;
 };

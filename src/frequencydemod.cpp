@@ -170,12 +170,19 @@ void FrequencyDemod::rebuildPostLpf()
 
     switch (postLpfMethod_) {
     case LpfMethod::KaiserFir: {
-        // Reference linear-phase FIR. Tap count from liquid's estimator at
-        // 60 dB stopband — this can be tens of thousands of taps for narrow
-        // cutoffs (slow, but the most accurate option).
+        // Reference linear-phase FIR. liquid's estimator wants tens of
+        // thousands of taps at narrow cutoffs (~7300 at fc/fs=5e-4 for 60 dB
+        // stopband); cap the length to keep per-tile cost bounded. At the
+        // cap the transition width widens (worse stop-band rejection at the
+        // very narrowest cutoffs) but visually it's still correct — the
+        // linear-phase response preserves wave shape, which is the whole
+        // reason this backend exists. 4096 taps gives ~9 kHz transition at
+        // 10 MHz Fs, more than adequate for FM-audio-rate cutoffs.
+        constexpr unsigned int kMaxTaps = 4096;
         const float atten = 60.0f;
         unsigned int len = estimate_req_filter_len(std::max(cutoff, 1e-4), atten);
         if (len < 3) len = 3;
+        if (len > kMaxTaps) len = kMaxTaps;
         std::vector<float> taps(len);
         liquid_firdes_kaiser(len, static_cast<float>(cutoff), atten, 0.0f, taps.data());
         // liquid_firdes_kaiser returns un-normalised taps — sum diverges from
