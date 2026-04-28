@@ -569,6 +569,21 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
         demod.assign(batchLen, 0.0f);
     }
 
+    // Small absolute file-start NaN mask for the upstream tuner's FIR
+    // cold-start. The bilateral pad above handles *our* LPF, but the
+    // tuner runs at full Fs upstream and its output samples [0..tuner_taps]
+    // are transient — feeding the freqdem garbage at file start, which we
+    // see as a one-time spike that dominates the autoscale. 4096 samples
+    // (≈ 400 µs at 10 MHz) covers the tuner FIR for any reasonable width
+    // and is small enough to not be visually noticeable.
+    constexpr size_t kFileStartMask = 4096;
+    if (start < kFileStartMask) {
+        const size_t bad = std::min(kFileStartMask - start, batchLen);
+        for (size_t i = 0; i < bad; ++i) {
+            demod[i] = std::numeric_limits<float>::quiet_NaN();
+        }
+    }
+
     batchCache_.startSample = start;
     batchCache_.length      = batchLen;
     batchCache_.data        = std::move(demod);

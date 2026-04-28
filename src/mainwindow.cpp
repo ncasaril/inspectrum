@@ -81,8 +81,10 @@ MainWindow::MainWindow()
 
     // Set defaults after making connections so everything is in sync
     dock->setDefaults();
-    // Show cursor (mouse) position in time and frequency in the status bar.
-    // valueText is filled when the cursor is over a derived trace plot.
+    // Show cursor (mouse) position in time and frequency in the status bar
+    // *and* mirror the sample value under the cursor into the dock's
+    // "Cursor value:" label (the dock entry is the discoverable one; the
+    // status bar text is just a bonus for users used to looking down).
     connect(plots, &PlotView::mousePositionChanged,
             this, [this](double timePos, double freqPos, QString valueText) {
         QString msg = QString("Time: %1 s   Freq: %2 Hz")
@@ -92,6 +94,7 @@ MainWindow::MainWindow()
             msg += QStringLiteral("   Value: ") + valueText;
         }
         statusBar()->showMessage(msg, 0);
+        this->dock->applyCursorValue(valueText);
     });
 
 }

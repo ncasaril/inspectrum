@@ -116,6 +116,11 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         "from zero-crossings around the trace's mean. Updates as you pan, "
         "zoom or change filter settings."));
     layout->addRow(new QLabel(tr("Auto period:")), autoPeriodLabel);
+    cursorValueLabel = new QLabel(QStringLiteral("—"));
+    cursorValueLabel->setToolTip(tr(
+        "Sample value at the mouse cursor when hovering over a derived "
+        "trace plot. Float for FM/AM/threshold, I+Q+|·| for IQ."));
+    layout->addRow(new QLabel(tr("Cursor value:")), cursorValueLabel);
     derivedPlotHeightSpinBox = new QSpinBox(widget);
     derivedPlotHeightSpinBox->setRange(20, 1000);
     derivedPlotHeightSpinBox->setValue(200);
@@ -364,4 +369,9 @@ void SpectrogramControls::applyAutoPeriod(double periodSeconds)
     autoPeriodLabel->setText(
         QString::fromStdString(formatSIValue(periodSeconds)) + QStringLiteral("s  (")
         + QString::fromStdString(formatSIValue(freq)) + QStringLiteral("Hz)"));
+}
+
+void SpectrogramControls::applyCursorValue(QString text)
+{
+    cursorValueLabel->setText(text.isEmpty() ? QStringLiteral("—") : text);
 }

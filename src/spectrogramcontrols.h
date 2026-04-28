@@ -70,6 +70,9 @@ public slots:
     // Show the auto-detected period (in seconds) of the visible FM trace.
     // periodSeconds <= 0 clears the label (no signal / not enough data).
     void applyAutoPeriod(double periodSeconds);
+    // Show the sample value under the cursor when hovering over a derived
+    // plot. Empty string clears the label.
+    void applyCursorValue(QString text);
 
 private slots:
     void fftSizeChanged(int value);
@@ -101,6 +104,8 @@ public:
     // Auto-detected dominant period of the visible FM trace (zero-crossing
     // estimate, updated whenever the view or filter changes).
     QLabel *autoPeriodLabel;
+    // Sample value at the mouse cursor when hovering a derived plot.
+    QLabel *cursorValueLabel;
     QCheckBox *scalesCheckBox;
     QCheckBox *annosCheckBox;
     QCheckBox *annoLabelCheckBox;
