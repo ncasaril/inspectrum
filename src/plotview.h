@@ -44,9 +44,12 @@ signals:
     /**
      * Emitted when the mouse moves over the plot area.
      * @param time     Time position in seconds corresponding to mouse X coordinate
-     * @param frequency  Frequency offset in Hz corresponding to mouse Y coordinate in spectrogram
+     * @param frequency  Frequency offset in Hz when the cursor is over the spectrogram (else 0)
+     * @param valueText  Pre-formatted sample-value string when the cursor is over a derived
+     *                   trace plot (e.g. "0.0042" for a float plot, "I=… Q=…" for IQ); empty
+     *                   when over the spectrogram or no readable plot.
      */
-    void mousePositionChanged(double time, double frequency);
+    void mousePositionChanged(double time, double frequency, QString valueText);
     // Echoed after autoTuneFmLpf() picks values, so the dock widgets can
     // be updated to reflect what was applied.
     void fmAutoLpfComputed(double cutoffHz, int predemodM, int postN);
@@ -120,6 +123,9 @@ private:
 
     void addPlot(Plot *plot);
     void emitTimeSelection();
+    // Read a single-sample value from a derived plot's source (FM/AM = float,
+    // IQ = complex<float>) and format for display in the status bar.
+    QString sampleValueText(Plot *plot, size_t sampleIdx);
     void extractSymbols(std::shared_ptr<AbstractSampleSource> src, bool toClipboard);
     void exportSamples(std::shared_ptr<AbstractSampleSource> src);
     template<typename SOURCETYPE> void exportSamples(std::shared_ptr<AbstractSampleSource> src);

@@ -205,25 +205,74 @@ void PlotView::addPlot(Plot *plot)
 void PlotView::mouseMoveEvent(QMouseEvent *event)
 {
     updateAnnotationTooltip(event);
-    // Emit current mouse position in time and frequency for status display
-    {
-        // Map X position to time (seconds)
-        int x = event->pos().x();
-        int hScroll = horizontalScrollBar()->value();
-        size_t sampleIdx = columnToSample(x + hScroll);
-        double timePos = (sampleRate > 0.0) ? (sampleIdx / sampleRate) : 0.0;
-        // Map Y position to frequency offset (Hz), with DC at center of spectrogram
-        double freqPos = 0.0;
+
+    int x = event->pos().x();
+    int y = event->pos().y();
+    int hScroll = horizontalScrollBar()->value();
+    size_t sampleIdx = columnToSample(x + hScroll);
+    double timePos = (sampleRate > 0.0) ? (sampleIdx / sampleRate) : 0.0;
+    int viewportH = viewport()->height();
+
+    double freqPos = 0.0;
+    QString valueText;
+
+    // Derived plots are stacked at the bottom of the viewport (each
+    // `derivedPlotHeight` tall). Top of the stack is at viewportH minus
+    // their total height. If the cursor is below that, it's over a derived
+    // plot — figure out which one and read its value at this x.
+    const int derivedCount = static_cast<int>(plots.size()) - 1;
+    const int derivedTotalH = derivedCount * derivedPlotHeight;
+    const int derivedTop = viewportH - derivedTotalH;
+    if (derivedCount > 0 && y >= derivedTop) {
+        const int posInDerived = y - derivedTop;
+        const int plotIdx = 1 + posInDerived / derivedPlotHeight;
+        if (plotIdx >= 1 && static_cast<size_t>(plotIdx) < plots.size()) {
+            valueText = sampleValueText(plots[plotIdx].get(), sampleIdx);
+        }
+    } else {
+        // Cursor is over the spectrogram (scrollable) — compute frequency
+        // offset from Y so the existing status-bar field stays correct.
         int vScroll = verticalScrollBar()->value();
-        int contentY = event->pos().y() + vScroll;
+        int contentY = y + vScroll;
         int plotH = spectrogramPlot->height();
         if (contentY >= 0 && contentY < plotH && sampleRate > 0.0) {
             double hzPerPixel = sampleRate / plotH;
             freqPos = ((plotH / 2.0) - contentY) * hzPerPixel;
         }
-        emit mousePositionChanged(timePos, freqPos);
     }
+
+    emit mousePositionChanged(timePos, freqPos, valueText);
     QGraphicsView::mouseMoveEvent(event);
+}
+
+QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx)
+{
+    auto tp = dynamic_cast<TracePlot*>(plot);
+    if (!tp) return QString();
+    auto src = tp->source();
+    if (!src) return QString();
+
+    // Float source (FM, AM, threshold): read one sample and format.
+    if (auto fsrc = std::dynamic_pointer_cast<SampleSource<float>>(src)) {
+        auto data = fsrc->getSamples(sampleIdx, 1);
+        if (!data) return QString();
+        float v = data[0];
+        if (!std::isfinite(v)) return QStringLiteral("NaN");
+        return QString::number(v, 'g', 6);
+    }
+    // Complex source (IQ plot): show I and Q separately plus magnitude.
+    if (auto csrc = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src)) {
+        auto data = csrc->getSamples(sampleIdx, 1);
+        if (!data) return QString();
+        float i = data[0].real();
+        float q = data[0].imag();
+        float mag = std::hypot(i, q);
+        return QStringLiteral("I=%1 Q=%2 |·|=%3")
+            .arg(i, 0, 'g', 4)
+            .arg(q, 0, 'g', 4)
+            .arg(mag, 0, 'g', 4);
+    }
+    return QString();
 }
 
 void PlotView::mouseReleaseEvent(QMouseEvent *event)

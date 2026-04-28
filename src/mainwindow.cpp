@@ -79,13 +79,16 @@ MainWindow::MainWindow()
 
     // Set defaults after making connections so everything is in sync
     dock->setDefaults();
-    // Show cursor (mouse) position in time and frequency in the status bar
+    // Show cursor (mouse) position in time and frequency in the status bar.
+    // valueText is filled when the cursor is over a derived trace plot.
     connect(plots, &PlotView::mousePositionChanged,
-            this, [this](double timePos, double freqPos) {
-        // Format with 6 decimal places for time, frequency in Hz
+            this, [this](double timePos, double freqPos, QString valueText) {
         QString msg = QString("Time: %1 s   Freq: %2 Hz")
             .arg(timePos, 0, 'f', 6)
             .arg(freqPos, 0, 'f', 0);
+        if (!valueText.isEmpty()) {
+            msg += QStringLiteral("   Value: ") + valueText;
+        }
         statusBar()->showMessage(msg, 0);
     });
 
