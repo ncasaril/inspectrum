@@ -22,6 +22,8 @@
 #include <QGraphicsView>
 #include <QPaintEvent>
 
+#include <QTimer>
+
 #include "cursors.h"
 #include "inputsource.h"
 #include "plot.h"
@@ -53,6 +55,10 @@ signals:
     // Echoed after autoTuneFmLpf() picks values, so the dock widgets can
     // be updated to reflect what was applied.
     void fmAutoLpfComputed(double cutoffHz, int predemodM, int postN);
+    // Auto-detected dominant period (seconds) of the visible FM trace.
+    // Emitted after the analysis debounce timer fires. periodSeconds<=0
+    // means "no signal / not enough data".
+    void autoPeriodChanged(double periodSeconds);
 
 public slots:
     void cursorsMoved();
@@ -139,6 +145,11 @@ private:
     int sampleToColumn(size_t sample);
     size_t columnToSample(int col);
     int derivedPlotHeight;
+    // Debounced auto-period analyser: bumped from updateView() and from
+    // every FM-filter setter; fires once after a short idle so we don't
+    // re-scan the visible region on every scroll tick.
+    QTimer *periodTimer = nullptr;
+    void analyzeVisiblePeriod();
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir

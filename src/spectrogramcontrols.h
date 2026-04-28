@@ -67,6 +67,9 @@ public slots:
     void zoomOut();
     void enableAnnotations(bool enabled);
     void applyAutoLpf(double cutoffHz, int predemodM, int postN);
+    // Show the auto-detected period (in seconds) of the visible FM trace.
+    // periodSeconds <= 0 clears the label (no signal / not enough data).
+    void applyAutoPeriod(double periodSeconds);
 
 private slots:
     void fftSizeChanged(int value);
@@ -95,6 +98,9 @@ public:
     QLabel *periodLabel;
     QLabel *symbolRateLabel;
     QLabel *symbolPeriodLabel;
+    // Auto-detected dominant period of the visible FM trace (zero-crossing
+    // estimate, updated whenever the view or filter changes).
+    QLabel *autoPeriodLabel;
     QCheckBox *scalesCheckBox;
     QCheckBox *annosCheckBox;
     QCheckBox *annoLabelCheckBox;

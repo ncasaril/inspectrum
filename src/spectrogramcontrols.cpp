@@ -24,6 +24,7 @@
 #include <QSettings>
 #include <QLabel>
 #include <cmath>
+#include <string>
 #include "util.h"
 
 SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent)
@@ -109,6 +110,12 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     // Derived plots settings
     layout->addRow(new QLabel()); // spacer
     layout->addRow(new QLabel(tr("<b>Derived Plots</b>")));
+    autoPeriodLabel = new QLabel(QStringLiteral("—"));
+    autoPeriodLabel->setToolTip(tr(
+        "Auto-detected dominant period of the visible FM trace, estimated "
+        "from zero-crossings around the trace's mean. Updates as you pan, "
+        "zoom or change filter settings."));
+    layout->addRow(new QLabel(tr("Auto period:")), autoPeriodLabel);
     derivedPlotHeightSpinBox = new QSpinBox(widget);
     derivedPlotHeightSpinBox->setRange(20, 1000);
     derivedPlotHeightSpinBox->setValue(200);
@@ -345,4 +352,16 @@ void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN
     emit fmLpfChanged(cutoffHz);
     fmPredemodDecimSpinBox->setValue(predemodM);
     fmDecimSpinBox->setValue(postN);
+}
+
+void SpectrogramControls::applyAutoPeriod(double periodSeconds)
+{
+    if (periodSeconds <= 0.0 || !std::isfinite(periodSeconds)) {
+        autoPeriodLabel->setText(QStringLiteral("—"));
+        return;
+    }
+    const double freq = 1.0 / periodSeconds;
+    autoPeriodLabel->setText(
+        QString::fromStdString(formatSIValue(periodSeconds)) + QStringLiteral("s  (")
+        + QString::fromStdString(formatSIValue(freq)) + QStringLiteral("Hz)"));
 }

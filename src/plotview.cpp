@@ -63,6 +63,16 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
     addPlot(spectrogramPlot);
 
     mainSampleSource->subscribe(this);
+
+    // Debounced re-analysis of the visible FM trace's dominant period.
+    // Restarted from updateView() and from every FM-filter setter so the
+    // dock label stays in sync with what the user sees, but only one scan
+    // runs per idle period.
+    periodTimer = new QTimer(this);
+    periodTimer->setSingleShot(true);
+    periodTimer->setInterval(200);
+    connect(periodTimer, &QTimer::timeout,
+            this, &PlotView::analyzeVisiblePeriod);
 }
 
 void PlotView::enableFastDemod(bool enabled)
@@ -100,6 +110,7 @@ void PlotView::setFmLpfCutoff(double hz)
     }
     QPixmapCache::clear();
     viewport()->update();
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::setFmDecimation(int n)
@@ -115,6 +126,7 @@ void PlotView::setFmDecimation(int n)
     }
     QPixmapCache::clear();
     viewport()->update();
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::setFmLpfMethod(int method)
@@ -130,6 +142,7 @@ void PlotView::setFmLpfMethod(int method)
     }
     QPixmapCache::clear();
     viewport()->update();
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::setFmPredemodDecimation(int m)
@@ -145,6 +158,7 @@ void PlotView::setFmPredemodDecimation(int m)
     }
     QPixmapCache::clear();
     viewport()->update();
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::autoTuneFmLpf()
@@ -181,6 +195,97 @@ void PlotView::autoTuneFmLpf()
     setFmPredemodDecimation(M);
     setFmDecimation(N);
     emit fmAutoLpfComputed(cutoff, M, N);
+}
+
+void PlotView::analyzeVisiblePeriod()
+{
+    // Find the first derived float-source plot (FM trace by convention) and
+    // estimate its dominant period over the currently-visible sample range
+    // by counting zero crossings around the trace's mean. Cheap, robust to
+    // amplitude scale, and works for any roughly-periodic signal — won't
+    // give meaningful numbers for noise or a flat trace, which the
+    // applyAutoPeriod() consumer handles by displaying "—".
+    if (sampleRate <= 0.0) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    SampleSource<float> *fsrc = nullptr;
+    for (auto &plt : plots) {
+        auto tp = dynamic_cast<TracePlot*>(plt.get());
+        if (!tp) continue;
+        auto typed = std::dynamic_pointer_cast<SampleSource<float>>(tp->source());
+        if (typed) { fsrc = typed.get(); break; }
+    }
+    if (!fsrc) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+
+    // Limit the analysis size — the FFT-free zero-crossing pass is O(N) and
+    // we just need a reasonable estimate, not microsecond precision.
+    constexpr size_t kMaxAnalyseSamples = 200000;
+    size_t n = viewRange.maximum > viewRange.minimum
+             ? (viewRange.maximum - viewRange.minimum) : 0;
+    if (n < 256) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    if (n > kMaxAnalyseSamples) n = kMaxAnalyseSamples;
+
+    auto data = fsrc->getSamples(viewRange.minimum, n);
+    if (!data) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+
+    double sum = 0.0;
+    size_t valid = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (std::isfinite(data[i])) { sum += data[i]; ++valid; }
+    }
+    if (valid < 256) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    const double mean = sum / valid;
+
+    // Hysteresis around the mean to avoid counting noise-level wobbles as
+    // crossings. Use a small fraction of the trace's span as a deadband.
+    double mn = std::numeric_limits<double>::infinity();
+    double mx = -std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(data[i])) continue;
+        if (data[i] < mn) mn = data[i];
+        if (data[i] > mx) mx = data[i];
+    }
+    const double span = mx - mn;
+    if (span <= 0.0) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    const double hyst = 0.1 * span;
+
+    // Count low-to-high crossings of the (data - mean) signal, with the
+    // value first having to dip below mean - hyst before a crossing back
+    // above mean + hyst counts. Each such crossing = one full period.
+    int periods = 0;
+    bool armedLow = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(data[i])) continue;
+        const double d = data[i] - mean;
+        if (d < -hyst) armedLow = true;
+        else if (armedLow && d > hyst) {
+            ++periods;
+            armedLow = false;
+        }
+    }
+    if (periods < 2) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    const double duration = static_cast<double>(n) / sampleRate;
+    const double period = duration / periods;
+    emit autoPeriodChanged(period);
 }
 
 void PlotView::addPlot(Plot *plot)
@@ -948,6 +1053,8 @@ void PlotView::updateView(bool reCenter, bool expanding)
 
     // Re-paint
     viewport()->update();
+    // Re-analyse the visible FM trace's period after the view settles.
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::setSampleRate(double rate)
