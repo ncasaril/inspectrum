@@ -74,7 +74,23 @@ bool TracePlot::wheelEvent(QWheelEvent *event)
     return false;
 }
 
-void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> /*sampleRange*/)
+void TracePlot::setHoverCursor(bool active, size_t sampleIdx,
+                               double value, QString valueText)
+{
+    hoverActive_ = active;
+    hoverSample_ = sampleIdx;
+    hoverValue_  = value;
+    hoverText_   = std::move(valueText);
+    emit repaint();
+}
+
+void TracePlot::setPeriodMarkers(std::vector<size_t> peakSamples)
+{
+    periodMarkers_ = std::move(peakSamples);
+    emit repaint();
+}
+
+void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     // Draw a left-margin y-axis (min / mid / max) and a dashed zero line when
     // zero is within the currently-displayed range. Values come from the shared
@@ -129,6 +145,89 @@ void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> /*sam
     painter.drawText(x, rect.top() + fm.ascent() + 1, sMax);
     painter.drawText(x, rect.top() + rect.height() / 2 + fm.ascent() / 2 - 1, sMid);
     painter.drawText(x, rect.bottom() - fm.descent() - 1, sMin);
+
+    // Sample-to-pixel mapping for the marker overlays.
+    auto sampleToX = [&](size_t s) -> int {
+        if (sampleRange.maximum <= sampleRange.minimum) return rect.left();
+        double t = (static_cast<double>(s) - sampleRange.minimum) /
+                   (sampleRange.maximum - sampleRange.minimum);
+        return rect.left() + static_cast<int>(t * rect.width());
+    };
+    auto valueToY = [&](double v) -> int {
+        // Inverse of paintMid's mapping: y = mid + (mid - v) / (visibleSpan/2) * H/2
+        double normalised = (v - mid) / (visibleSpan * 0.5);  // [-1, 1]
+        return rect.y() + static_cast<int>((1.0 - normalised) * (rect.height() * 0.5));
+    };
+
+    // Period markers: small upward triangle at each peak that's in view, plus
+    // a horizontal line connecting consecutive in-view peaks at the trace's
+    // top so the user can see the period span at a glance. Skip cleanly when
+    // there are < 2 in-view markers.
+    if (periodMarkers_.size() >= 2) {
+        QPen markerPen(QColor(255, 200, 0, 220), 1);
+        painter.setPen(markerPen);
+        const int triH = 6;
+        const int yLine = rect.top() + 3;
+        int prevX = -1;
+        for (size_t s : periodMarkers_) {
+            if (s < sampleRange.minimum || s >= sampleRange.maximum) continue;
+            int mx = sampleToX(s);
+            // Triangle pointing down from yLine
+            QPolygon tri;
+            tri << QPoint(mx, yLine + triH)
+                << QPoint(mx - triH/2, yLine)
+                << QPoint(mx + triH/2, yLine);
+            painter.setBrush(QColor(255, 200, 0, 220));
+            painter.drawPolygon(tri);
+            painter.setBrush(Qt::NoBrush);
+            // Vertical guide down to the trace area
+            painter.setPen(QPen(QColor(255, 200, 0, 60), 1, Qt::DashLine));
+            painter.drawLine(mx, yLine + triH, mx, rect.bottom());
+            painter.setPen(markerPen);
+            // Connecting line to the previous in-view peak at the marker row
+            if (prevX >= 0) {
+                painter.drawLine(prevX, yLine + triH, mx, yLine + triH);
+            }
+            prevX = mx;
+        }
+    }
+
+    // Hover-cursor overlay: vertical line at the cursor's sample, small
+    // filled dot at the data value, and the value text in a translucent
+    // pill (placed above or below the dot to stay on-screen).
+    if (hoverActive_ &&
+        hoverSample_ >= sampleRange.minimum &&
+        hoverSample_ <  sampleRange.maximum)
+    {
+        const int cx = sampleToX(hoverSample_);
+        // Vertical guide
+        painter.setPen(QPen(QColor(120, 220, 255, 180), 1, Qt::DashLine));
+        painter.drawLine(cx, rect.top(), cx, rect.bottom());
+        // Dot at the sample value (only if the value is finite and in range)
+        if (std::isfinite(hoverValue_)) {
+            int cy = valueToY(hoverValue_);
+            cy = std::max(rect.top(), std::min(rect.bottom(), cy));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(120, 220, 255, 230));
+            painter.drawEllipse(QPoint(cx, cy), 3, 3);
+            painter.setBrush(Qt::NoBrush);
+        }
+        // Text label
+        if (!hoverText_.isEmpty()) {
+            QFontMetrics tm(painter.font());
+            int tw = tm.width(hoverText_);
+            int th = tm.height();
+            int pad = 3;
+            int tx = cx + 6;
+            // Flip to the left if running off the right edge
+            if (tx + tw + 2 * pad > rect.right()) tx = cx - 6 - tw - 2 * pad;
+            int ty = rect.top() + 2;
+            painter.fillRect(tx, ty, tw + 2 * pad, th + 2 * pad,
+                             QColor(0, 0, 0, 180));
+            painter.setPen(QColor(120, 220, 255));
+            painter.drawText(tx + pad, ty + pad + tm.ascent(), hoverText_);
+        }
+    }
 
     painter.restore();
 }

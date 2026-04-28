@@ -45,6 +45,17 @@ public:
     std::shared_ptr<AbstractSampleSource> source() { return sampleSource; };
     // Handle vertical zoom via mouse wheel
     bool wheelEvent(QWheelEvent *event) override;
+    // Set/clear the hover-cursor overlay (vertical line + value label drawn
+    // by paintFront). PlotView sets this on the plot under the mouse, and
+    // clears all others, so only the active plot shows the marker.
+    void setHoverCursor(bool active, size_t sampleIdx,
+                        double value, QString valueText);
+    // Peak markers used by the auto-period analyser. Each entry is an
+    // absolute sample index where a peak was detected; paintFront draws a
+    // small triangle at each peak that's currently in view and a horizontal
+    // line connecting consecutive peaks so the period is visible at a
+    // glance. Pass an empty vector to clear.
+    void setPeriodMarkers(std::vector<size_t> peakSamples);
 
 signals:
     void imageReady(QString key, QImage image);
@@ -84,6 +95,14 @@ private:
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
     const int defaultTileWidth = 1000;
+    // Hover-cursor state — drawn by paintFront on top of the trace.
+    bool         hoverActive_ = false;
+    size_t       hoverSample_ = 0;
+    double       hoverValue_  = 0.0;
+    QString      hoverText_;
+    // Auto-period peak markers (absolute sample indices). Drawn by
+    // paintFront whenever the visible range overlaps with the marker.
+    std::vector<size_t> periodMarkers_;
 
     // Kick off a background global min/max compute if the view has changed.
     void scheduleMinMaxIfNeeded(range_t<size_t> sampleRange);

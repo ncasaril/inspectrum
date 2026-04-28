@@ -19,6 +19,7 @@
 
 #include "plotview.h"
 #include "frequencydemod.h"
+#include "util.h"
 #include <QPixmapCache>
 #include <iostream>
 #include <fstream>
@@ -201,20 +202,20 @@ void PlotView::analyzeVisiblePeriod()
 {
     // Find the first derived float-source plot (FM trace by convention) and
     // estimate its dominant period over the currently-visible sample range
-    // by counting zero crossings around the trace's mean. Cheap, robust to
-    // amplitude scale, and works for any roughly-periodic signal — won't
-    // give meaningful numbers for noise or a flat trace, which the
-    // applyAutoPeriod() consumer handles by displaying "—".
+    // by counting upward crossings of the trace's mean (with hysteresis).
+    // Records each detected crossing point so TracePlot::paintFront can
+    // overlay markers + a connecting line.
     if (sampleRate <= 0.0) {
         emit autoPeriodChanged(0.0);
         return;
     }
+    TracePlot *targetPlot = nullptr;
     SampleSource<float> *fsrc = nullptr;
     for (auto &plt : plots) {
         auto tp = dynamic_cast<TracePlot*>(plt.get());
         if (!tp) continue;
         auto typed = std::dynamic_pointer_cast<SampleSource<float>>(tp->source());
-        if (typed) { fsrc = typed.get(); break; }
+        if (typed) { fsrc = typed.get(); targetPlot = tp; break; }
     }
     if (!fsrc) {
         emit autoPeriodChanged(0.0);
@@ -227,6 +228,7 @@ void PlotView::analyzeVisiblePeriod()
     size_t n = viewRange.maximum > viewRange.minimum
              ? (viewRange.maximum - viewRange.minimum) : 0;
     if (n < 256) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
         emit autoPeriodChanged(0.0);
         return;
     }
@@ -234,6 +236,7 @@ void PlotView::analyzeVisiblePeriod()
 
     auto data = fsrc->getSamples(viewRange.minimum, n);
     if (!data) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
         emit autoPeriodChanged(0.0);
         return;
     }
@@ -244,13 +247,12 @@ void PlotView::analyzeVisiblePeriod()
         if (std::isfinite(data[i])) { sum += data[i]; ++valid; }
     }
     if (valid < 256) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
         emit autoPeriodChanged(0.0);
         return;
     }
     const double mean = sum / valid;
 
-    // Hysteresis around the mean to avoid counting noise-level wobbles as
-    // crossings. Use a small fraction of the trace's span as a deadband.
     double mn = std::numeric_limits<double>::infinity();
     double mx = -std::numeric_limits<double>::infinity();
     for (size_t i = 0; i < n; ++i) {
@@ -260,32 +262,38 @@ void PlotView::analyzeVisiblePeriod()
     }
     const double span = mx - mn;
     if (span <= 0.0) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
         emit autoPeriodChanged(0.0);
         return;
     }
     const double hyst = 0.1 * span;
 
-    // Count low-to-high crossings of the (data - mean) signal, with the
-    // value first having to dip below mean - hyst before a crossing back
-    // above mean + hyst counts. Each such crossing = one full period.
-    int periods = 0;
+    // Each upward crossing of (data - mean) = 0 with hysteresis = one
+    // period boundary. Record the absolute sample index of each crossing
+    // so the plot can render markers.
+    std::vector<size_t> peaks;
     bool armedLow = false;
     for (size_t i = 0; i < n; ++i) {
         if (!std::isfinite(data[i])) continue;
         const double d = data[i] - mean;
         if (d < -hyst) armedLow = true;
         else if (armedLow && d > hyst) {
-            ++periods;
+            peaks.push_back(viewRange.minimum + i);
             armedLow = false;
         }
     }
-    if (periods < 2) {
+    if (peaks.size() < 2) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
         emit autoPeriodChanged(0.0);
         return;
     }
-    const double duration = static_cast<double>(n) / sampleRate;
-    const double period = duration / periods;
-    emit autoPeriodChanged(period);
+    // Period = (last peak time - first peak time) / (peaks - 1) — uses the
+    // span between detected peaks rather than the visible duration so an
+    // off-by-one near the edges doesn't bias the estimate.
+    const double dt = static_cast<double>(peaks.back() - peaks.front())
+                    / (peaks.size() - 1) / sampleRate;
+    if (targetPlot) targetPlot->setPeriodMarkers(std::move(peaks));
+    emit autoPeriodChanged(dt);
 }
 
 void PlotView::addPlot(Plot *plot)
@@ -324,15 +332,20 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
     // Derived plots are stacked at the bottom of the viewport (each
     // `derivedPlotHeight` tall). Top of the stack is at viewportH minus
     // their total height. If the cursor is below that, it's over a derived
-    // plot — figure out which one and read its value at this x.
+    // plot — figure out which one, read its value, and push a hover-cursor
+    // overlay to that plot. Clear hover on every other derived plot so
+    // only the active one shows the marker.
     const int derivedCount = static_cast<int>(plots.size()) - 1;
     const int derivedTotalH = derivedCount * derivedPlotHeight;
     const int derivedTop = viewportH - derivedTotalH;
+    int activePlotIdx = -1;
+    double hoverValue = std::numeric_limits<double>::quiet_NaN();
     if (derivedCount > 0 && y >= derivedTop) {
         const int posInDerived = y - derivedTop;
         const int plotIdx = 1 + posInDerived / derivedPlotHeight;
         if (plotIdx >= 1 && static_cast<size_t>(plotIdx) < plots.size()) {
-            valueText = sampleValueText(plots[plotIdx].get(), sampleIdx);
+            activePlotIdx = plotIdx;
+            valueText = sampleValueText(plots[plotIdx].get(), sampleIdx, &hoverValue);
         }
     } else {
         // Cursor is over the spectrogram (scrollable) — compute frequency
@@ -346,32 +359,57 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
         }
     }
 
+    // Push hover state onto the active derived plot, clear all others.
+    for (size_t i = 1; i < plots.size(); ++i) {
+        if (auto tp = dynamic_cast<TracePlot*>(plots[i].get())) {
+            if (static_cast<int>(i) == activePlotIdx) {
+                tp->setHoverCursor(true, sampleIdx, hoverValue, valueText);
+            } else {
+                tp->setHoverCursor(false, 0, 0.0, QString());
+            }
+        }
+    }
+
     emit mousePositionChanged(timePos, freqPos, valueText);
     QGraphicsView::mouseMoveEvent(event);
 }
 
-QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx)
+QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx, double *rawValueOut)
 {
+    if (rawValueOut) *rawValueOut = std::numeric_limits<double>::quiet_NaN();
     auto tp = dynamic_cast<TracePlot*>(plot);
     if (!tp) return QString();
     auto src = tp->source();
     if (!src) return QString();
 
-    // Float source (FM, AM, threshold): read one sample and format.
+    // Float source. Distinguish FM (FrequencyDemod) so we can convert the
+    // freqdem's normalised output to instantaneous frequency in Hz —
+    // f_inst = m · kf · Fs, with kf = 0.49 fixed in FrequencyDemod's ctor.
     if (auto fsrc = std::dynamic_pointer_cast<SampleSource<float>>(src)) {
         auto data = fsrc->getSamples(sampleIdx, 1);
         if (!data) return QString();
         float v = data[0];
+        if (rawValueOut) *rawValueOut = v;
         if (!std::isfinite(v)) return QStringLiteral("NaN");
+        if (dynamic_cast<FrequencyDemod*>(src.get()) && sampleRate > 0.0) {
+            const double kf = 0.49;
+            const double instHz = static_cast<double>(v) * kf * sampleRate;
+            return QStringLiteral("%1 Hz")
+                .arg(QString::fromStdString(formatSIValue(instHz)));
+        }
+        // AM and threshold are dimensionless w.r.t. the IQ scale —
+        // just show the raw float so the user sees the same number
+        // they'd read off the y-axis label.
         return QString::number(v, 'g', 6);
     }
-    // Complex source (IQ plot): show I and Q separately plus magnitude.
+    // Complex source (IQ plot): show I and Q plus magnitude.
     if (auto csrc = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src)) {
         auto data = csrc->getSamples(sampleIdx, 1);
         if (!data) return QString();
         float i = data[0].real();
         float q = data[0].imag();
         float mag = std::hypot(i, q);
+        if (rawValueOut) *rawValueOut = mag;
         return QStringLiteral("I=%1 Q=%2 |·|=%3")
             .arg(i, 0, 'g', 4)
             .arg(q, 0, 'g', 4)

@@ -131,7 +131,10 @@ private:
     void emitTimeSelection();
     // Read a single-sample value from a derived plot's source (FM/AM = float,
     // IQ = complex<float>) and format for display in the status bar.
-    QString sampleValueText(Plot *plot, size_t sampleIdx);
+    // rawValueOut, if non-null, also receives the unscaled float used to
+    // place the hover dot on the trace (NaN if no readable value).
+    QString sampleValueText(Plot *plot, size_t sampleIdx,
+                            double *rawValueOut = nullptr);
     void extractSymbols(std::shared_ptr<AbstractSampleSource> src, bool toClipboard);
     void exportSamples(std::shared_ptr<AbstractSampleSource> src);
     template<typename SOURCETYPE> void exportSamples(std::shared_ptr<AbstractSampleSource> src);
