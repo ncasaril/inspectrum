@@ -171,6 +171,19 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     connect(fmDecimSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::fmDecimChanged);
 
+    // Auto-tune button: ask PlotView to pick reasonable values for cutoff,
+    // predemod M, and post N. PlotView computes from current Fs and tuner
+    // bandwidth, applies via the existing setters, and echoes the values
+    // back via applyAutoLpf so these widgets stay in sync.
+    fmAutoLpfButton = new QPushButton(tr("Auto-tune FM LPF"), widget);
+    fmAutoLpfButton->setToolTip(tr(
+        "Pick reasonable values for FM LPF cutoff, predemod decimation (M), "
+        "and post decimation (N) from the current sample rate and tuner "
+        "bandwidth."));
+    layout->addRow(fmAutoLpfButton);
+    connect(fmAutoLpfButton, &QPushButton::clicked,
+            this, &SpectrogramControls::autoLpfRequested);
+
     widget->setLayout(layout);
     setWidget(widget);
 
@@ -319,4 +332,17 @@ void SpectrogramControls::zoomOut()
 void SpectrogramControls::enableAnnotations(bool enabled) {
     // disable annotation comments checkbox when annotations are disabled
     commentsCheckBox->setEnabled(enabled);
+}
+
+void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN)
+{
+    // Mirror the PlotView-computed values back into the widgets. The
+    // QSpinBox setValue calls fire valueChanged → re-apply via PlotView's
+    // setters; that's idempotent (the setter sees the same value and is
+    // a no-op). For the QLineEdit we have to emit fmLpfChanged manually
+    // because editingFinished doesn't fire on programmatic setText().
+    fmLpfLineEdit->setText(QString::number(cutoffHz, 'f', 0));
+    emit fmLpfChanged(cutoffHz);
+    fmPredemodDecimSpinBox->setValue(predemodM);
+    fmDecimSpinBox->setValue(postN);
 }

@@ -47,6 +47,9 @@ signals:
      * @param frequency  Frequency offset in Hz corresponding to mouse Y coordinate in spectrogram
      */
     void mousePositionChanged(double time, double frequency);
+    // Echoed after autoTuneFmLpf() picks values, so the dock widgets can
+    // be updated to reflect what was applied.
+    void fmAutoLpfComputed(double cutoffHz, int predemodM, int postN);
 
 public slots:
     void cursorsMoved();
@@ -79,6 +82,10 @@ public slots:
     void setFmDecimation(int n);
     // Pre-demod IQ decimation factor (1 = off).
     void setFmPredemodDecimation(int m);
+    // Pick reasonable LPF cutoff, predemod M, and post N from the current
+    // sample rate and tuner bandwidth. Applies them and emits
+    // fmAutoLpfComputed() so the dock widgets can mirror.
+    void autoTuneFmLpf();
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;

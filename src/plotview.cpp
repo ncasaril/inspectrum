@@ -147,6 +147,42 @@ void PlotView::setFmPredemodDecimation(int m)
     viewport()->update();
 }
 
+void PlotView::autoTuneFmLpf()
+{
+    if (!spectrogramPlot || sampleRate <= 0.0) return;
+    auto src = spectrogramPlot->output();
+    if (!src) return;
+    // relativeBandwidth is the tuner span as a fraction of Fs. It lives on
+    // SampleSource<T>, not AbstractSampleSource, so we have to cast — the
+    // tuner output is always complex<float>.
+    auto typed = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src);
+    double relBw = typed ? typed->relativeBandwidth() : 1.0;
+    if (relBw <= 0.0 || relBw > 1.0) relBw = 1.0;
+    const double tunerBw = relBw * sampleRate;
+
+    // Heuristic cutoff: tunerBw / 50 — captures the slowly-varying envelope
+    // of typical FM modulation while clamping to a usable range so very
+    // wide or very narrow tuners still get a sane number.
+    double cutoff = tunerBw / 50.0;
+    if (cutoff < 500.0)   cutoff = 500.0;
+    if (cutoff > 50000.0) cutoff = 50000.0;
+
+    // Pre-demod decimation must keep the freqdem's effective Nyquist above
+    // tunerBw — i.e. M ≤ 1/(2·relBw). Pick 80% of that for safety. Also
+    // bound by a useful-cutoff target (Fs/(4·fc)) so we don't decimate
+    // past what the post-LPF can take advantage of, and a hard ceiling to
+    // keep msresamp's per-stage halfband cost bounded.
+    int M_alias = std::max(1, static_cast<int>(std::floor(0.8 / (2.0 * relBw))));
+    int M_lpf   = std::max(1, static_cast<int>(std::floor(sampleRate / (4.0 * cutoff))));
+    int M = std::min({M_alias, M_lpf, 100});
+    int N = 1; // post-decim adds nothing once predemod decim is on
+
+    setFmLpfCutoff(cutoff);
+    setFmPredemodDecimation(M);
+    setFmDecimation(N);
+    emit fmAutoLpfComputed(cutoff, M, N);
+}
+
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);

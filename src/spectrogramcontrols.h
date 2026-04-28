@@ -56,12 +56,17 @@ signals:
     // Pre-demod IQ decimation factor (1 = off). When set the FM demod
     // chain runs at Fs/M (IQEngine pattern).
     void fmPredemodDecimChanged(int m);
+    // User clicked "Auto-tune FM LPF" — PlotView picks values from the
+    // current Fs / tuner bandwidth, applies them, then echoes them back
+    // to applyAutoLpf so the dock widgets stay in sync.
+    void autoLpfRequested();
 
 public slots:
     void timeSelectionChanged(float time);
     void zoomIn();
     void zoomOut();
     void enableAnnotations(bool enabled);
+    void applyAutoLpf(double cutoffHz, int predemodM, int postN);
 
 private slots:
     void fftSizeChanged(int value);
@@ -110,4 +115,6 @@ public:
     QSpinBox   *fmDecimSpinBox;
     // FM pre-demod IQ decimation (1 disables)
     QSpinBox   *fmPredemodDecimSpinBox;
+    // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
+    QPushButton *fmAutoLpfButton;
 };
