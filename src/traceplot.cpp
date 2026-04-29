@@ -153,10 +153,18 @@ void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampl
                    (sampleRange.maximum - sampleRange.minimum);
         return rect.left() + static_cast<int>(t * rect.width());
     };
+    // Mirror paintMid's float-trace mapping exactly: with yScale=1 the
+    // data fills the middle half of the plot, so v=maxv lands at h/4 (not
+    // at the top — the top of the rect is "empty headroom"). Using the
+    // same formula keeps the hover dot on top of the rendered green line
+    // instead of at a different scale.
+    const int plotH = height();
+    const double invRange = (maxv > minv) ? (yScale / (maxv - minv)) : 1.0;
     auto valueToY = [&](double v) -> int {
-        // Inverse of paintMid's mapping: y = mid + (mid - v) / (visibleSpan/2) * H/2
-        double normalised = (v - mid) / (visibleSpan * 0.5);  // [-1, 1]
-        return rect.y() + static_cast<int>((1.0 - normalised) * (rect.height() * 0.5));
+        double norm = (v - mid) * invRange;
+        if (norm >  1.0) norm =  1.0;
+        if (norm < -1.0) norm = -1.0;
+        return rect.y() + static_cast<int>((1.0 - norm) * (plotH * 0.5));
     };
 
     // Period markers: small upward triangle at each peak that's in view, plus
