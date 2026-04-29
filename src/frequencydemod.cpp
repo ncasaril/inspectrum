@@ -569,6 +569,20 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
         demod.assign(batchLen, 0.0f);
     }
 
+    // Scale freqdem's normalised output (m ∈ [-1, 1] for full ±kf·Fs
+    // deviation) to instantaneous frequency in Hz: f = m · kf · Fs. Doing
+    // this at the source means the plot's Y-axis labels read in Hz and
+    // the hover value just appends "Hz" — no double-conversion anywhere.
+    // Cheap mode (phase-diff path) gives `arg` per sample which is
+    // already 2π·f/Fs, so its Hz scale is Fs/(2π) instead.
+    {
+        const double scale = cheap
+            ? (fs / (2.0 * M_PI))
+            : (0.49 * fs);
+        const float scalef = static_cast<float>(scale);
+        for (auto &s : demod) s *= scalef;
+    }
+
     // Small absolute file-start NaN mask for the upstream tuner's FIR
     // cold-start. The bilateral pad above handles *our* LPF, but the
     // tuner runs at full Fs upstream and its output samples [0..tuner_taps]
@@ -714,6 +728,17 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
 
     applyPostLpf(out, count);
     applyPostDecimation(out, count, sampleid);
+
+    // Scale to instantaneous frequency in Hz (see fillBatchCache for the
+    // matching scaling on the batched path). Y-axis labels and the hover
+    // value both read in Hz from this point on.
+    {
+        const double scale = cheapMode_
+            ? (rate() / (2.0 * M_PI))
+            : (0.49 * rate());
+        const float scalef = static_cast<float>(scale);
+        for (int i = 0; i < count; ++i) out[i] *= scalef;
+    }
 
     // Stats after the LPF (still pre-NaN-mark) so we can see what the filter
     // produced before the cold-start mask hides it.

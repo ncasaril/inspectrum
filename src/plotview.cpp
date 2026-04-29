@@ -398,24 +398,22 @@ QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx, double *rawValue
     auto src = tp->source();
     if (!src) return QString();
 
-    // Float source. Distinguish FM (FrequencyDemod) so we can convert the
-    // freqdem's normalised output to instantaneous frequency in Hz —
-    // f_inst = m · kf · Fs, with kf = 0.49 fixed in FrequencyDemod's ctor.
+    // Float source. FrequencyDemod now scales its output to Hz at the
+    // source (see fillBatchCache / work in frequencydemod.cpp), so all the
+    // hover formatter has to do is detect "this is the FM trace" and
+    // append "Hz". The Y-axis labels read in Hz too — same value either
+    // way. AM and threshold are dimensionless w.r.t. the IQ scale, so
+    // show the raw float.
     if (auto fsrc = std::dynamic_pointer_cast<SampleSource<float>>(src)) {
         auto data = fsrc->getSamples(sampleIdx, 1);
         if (!data) return QString();
         float v = data[0];
         if (rawValueOut) *rawValueOut = v;
         if (!std::isfinite(v)) return QStringLiteral("NaN");
-        if (dynamic_cast<FrequencyDemod*>(src.get()) && sampleRate > 0.0) {
-            const double kf = 0.49;
-            const double instHz = static_cast<double>(v) * kf * sampleRate;
-            return QStringLiteral("%1 Hz")
-                .arg(QString::fromStdString(formatSIValue(instHz)));
+        if (dynamic_cast<FrequencyDemod*>(src.get())) {
+            return QStringLiteral("%1Hz")
+                .arg(QString::fromStdString(formatSIValue(v)));
         }
-        // AM and threshold are dimensionless w.r.t. the IQ scale —
-        // just show the raw float so the user sees the same number
-        // they'd read off the y-axis label.
         return QString::number(v, 'g', 6);
     }
     // Complex source (IQ plot): show I and Q plus magnitude.
