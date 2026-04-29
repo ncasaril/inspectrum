@@ -60,6 +60,11 @@ signals:
     // current Fs / tuner bandwidth, applies them, then echoes them back
     // to applyAutoLpf so the dock widgets stay in sync.
     void autoLpfRequested();
+    // Auto-period analysis on/off. Off = no scan, no label, no on-plot
+    // markers. On (default off) = continuous analysis after each view or
+    // filter change, label updates, and triangle/line overlay drawn on
+    // the FM trace.
+    void periodAnalysisChanged(bool enabled);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -104,6 +109,9 @@ public:
     // Auto-detected dominant period of the visible FM trace (zero-crossing
     // estimate, updated whenever the view or filter changes).
     QLabel *autoPeriodLabel;
+    // Toggle for the period analysis (label + on-plot markers). Off by
+    // default — the markers get noisy on broadband signals.
+    QCheckBox *periodAnalysisCheckBox;
     // Sample value at the mouse cursor when hovering a derived plot.
     QLabel *cursorValueLabel;
     QCheckBox *scalesCheckBox;

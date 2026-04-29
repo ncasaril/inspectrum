@@ -116,6 +116,15 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         "from zero-crossings around the trace's mean. Updates as you pan, "
         "zoom or change filter settings."));
     layout->addRow(new QLabel(tr("Auto period:")), autoPeriodLabel);
+    periodAnalysisCheckBox = new QCheckBox(widget);
+    periodAnalysisCheckBox->setCheckState(Qt::Unchecked);
+    periodAnalysisCheckBox->setToolTip(tr(
+        "Run the period analyser and draw peak markers on the FM trace. "
+        "Disabled by default because the markers can be hectic on noisy "
+        "signals."));
+    layout->addRow(new QLabel(tr("Period markers:")), periodAnalysisCheckBox);
+    connect(periodAnalysisCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::periodAnalysisChanged);
     cursorValueLabel = new QLabel(QStringLiteral("—"));
     cursorValueLabel->setToolTip(tr(
         "Sample value at the mouse cursor when hovering over a derived "

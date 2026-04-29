@@ -198,6 +198,22 @@ void PlotView::autoTuneFmLpf()
     emit fmAutoLpfComputed(cutoff, M, N);
 }
 
+void PlotView::setPeriodAnalysisEnabled(bool enabled)
+{
+    periodAnalysisEnabled = enabled;
+    if (enabled) {
+        if (periodTimer) periodTimer->start();
+    } else {
+        // Clear any existing markers and the dock label.
+        for (auto &plt : plots) {
+            if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+                tp->setPeriodMarkers({});
+            }
+        }
+        emit autoPeriodChanged(0.0);
+    }
+}
+
 void PlotView::analyzeVisiblePeriod()
 {
     // Find the first derived float-source plot (FM trace by convention) and
@@ -205,7 +221,7 @@ void PlotView::analyzeVisiblePeriod()
     // by counting upward crossings of the trace's mean (with hysteresis).
     // Records each detected crossing point so TracePlot::paintFront can
     // overlay markers + a connecting line.
-    if (sampleRate <= 0.0) {
+    if (!periodAnalysisEnabled || sampleRate <= 0.0) {
         emit autoPeriodChanged(0.0);
         return;
     }

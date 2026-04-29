@@ -72,6 +72,7 @@ MainWindow::MainWindow()
     connect(plots, &PlotView::fmAutoLpfComputed, dock, &SpectrogramControls::applyAutoLpf);
     // Auto period-detection on the visible FM trace, fed into the dock label.
     connect(plots, &PlotView::autoPeriodChanged, dock, &SpectrogramControls::applyAutoPeriod);
+    connect(dock, &SpectrogramControls::periodAnalysisChanged, plots, &PlotView::setPeriodAnalysisEnabled);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

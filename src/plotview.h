@@ -95,6 +95,9 @@ public slots:
     // sample rate and tuner bandwidth. Applies them and emits
     // fmAutoLpfComputed() so the dock widgets can mirror.
     void autoTuneFmLpf();
+    // Toggle the period analyser. When off, no scan runs and any existing
+    // markers / period label are cleared.
+    void setPeriodAnalysisEnabled(bool enabled);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -150,8 +153,10 @@ private:
     int derivedPlotHeight;
     // Debounced auto-period analyser: bumped from updateView() and from
     // every FM-filter setter; fires once after a short idle so we don't
-    // re-scan the visible region on every scroll tick.
+    // re-scan the visible region on every scroll tick. Gated by
+    // periodAnalysisEnabled (off by default).
     QTimer *periodTimer = nullptr;
+    bool   periodAnalysisEnabled = false;
     void analyzeVisiblePeriod();
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
