@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <limits>
 #include "util.h"
+#include "latencylog.h"
 
 
 SpectrogramPlot::SpectrogramPlot(std::shared_ptr<SampleSource<std::complex<float>>> src) : Plot(src), inputSource(src), fftSize(512), tuner(fftSize, this)
@@ -45,6 +46,15 @@ SpectrogramPlot::SpectrogramPlot(std::shared_ptr<SampleSource<std::complex<float
     sigmfAnnotationsEnabled = true;
     sigmfAnnotationLabels = true;
     sigmfAnnotationColors = true;
+
+    // Default QCache cost limit is 100. A single wide-zoom view of a long
+    // capture can need 200+ tiles, which means every paint evicts tiles it
+    // just rendered → synchronous FFT recompute on the GUI thread → 200 ms
+    // paints. Each tile pixmap and fft entry is 256 kB (tileSize × 4 B), so
+    // 512 entries gives a ~256 MB combined budget that covers very wide
+    // views with comfortable headroom for pan history.
+    pixmapCache.setMaxCost(512);
+    fftCache.setMaxCost(512);
 
     for (int i = 0; i < 256; i++) {
         float p = (float)i / 256;
@@ -256,6 +266,7 @@ QPixmap* SpectrogramPlot::getPixmapTile(size_t tile)
     if (obj != 0)
         return obj;
 
+    LatencyLog::markf("specgm getPixmapTile MISS tile=%zu (FFT compute+colormap)", tile);
     float *fftTile = getFFTTile(tile);
     obj = new QPixmap(linesPerTile(), fftSize);
     QImage image(linesPerTile(), fftSize, QImage::Format_RGB32);
@@ -272,6 +283,7 @@ QPixmap* SpectrogramPlot::getPixmapTile(size_t tile)
     }
     obj->convertFromImage(image);
     pixmapCache.insert(TileCacheKey(fftSize, zoomLevel, nfftSkip, tile), obj);
+    LatencyLog::markf("specgm getPixmapTile DONE tile=%zu", tile);
     return obj;
 }
 
@@ -453,15 +465,60 @@ bool SpectrogramPlot::tunerEnabled()
     return (tunerTransform->subscriberCount() > 0);
 }
 
+void SpectrogramPlot::setTunerCentreY(int y)
+{
+    // Clamp into the plot so the cursors stay visible. The tuner uses
+    // [0..height()] in plot pixels; freq mapping is in getTunerPhaseInc().
+    if (y < 0) y = 0;
+    if (y > height()) y = height();
+    tuner.setCentre(y);
+    tunerMoved();
+}
+
 void SpectrogramPlot::tunerMoved()
 {
-    tunerTransform->setFrequency(getTunerPhaseInc());
-    tunerTransform->setTaps(getTunerTaps());
+    LatencyLog::mark("tunerMoved start");
+    const float newFreq = getTunerPhaseInc();
+    tunerTransform->setFrequency(newFreq);
+
+    // Tap design is the dominant per-event cost during a tuner drag
+    // (liquid_firdes_kaiser scales with filter length, which gets large at
+    // narrow cutoffs). The taps only depend on deviation/fftSize/powerMax —
+    // pure centre-frequency moves don't touch any of those, so the same
+    // taps are valid and we can skip the redesign + setTaps mutex round.
+    const int   dev   = tuner.deviation();
+    const int   fft_  = fftSize;
+    const float pmax_ = powerMax;
+    bool tapsRebuilt = false;
+    if (dev != lastTapsDeviation_ || fft_ != lastTapsFftSize_ ||
+        pmax_ != lastTapsPowerMax_) {
+        tunerTransform->setTaps(getTunerTaps());
+        lastTapsDeviation_ = dev;
+        lastTapsFftSize_   = fft_;
+        lastTapsPowerMax_  = pmax_;
+        tapsRebuilt = true;
+    }
+
     tunerTransform->setRelativeBandwith(tuner.deviation() * 2.0 / height());
 
-    // TODO: for invalidating traceplot cache, this shouldn't really go here
-    QPixmapCache::clear();
+    // Skip the invalidate fan-out when nothing the downstream chain cares
+    // about actually moved. The Tuner emits `tunerMoved` on every mouse
+    // event during drag and on release; many of those events leave
+    // (frequency, deviation) unchanged (mouse release in the same pixel,
+    // duplicate moves while still being processed). Without this guard
+    // every spurious emit triggers a full demod re-render and burns a
+    // worker cycle.
+    const bool notifyNeeded = tapsRebuilt ||
+                              newFreq != lastNotifiedFrequency_ ||
+                              dev     != lastNotifiedDeviation_;
+    if (notifyNeeded) {
+        lastNotifiedFrequency_ = newFreq;
+        lastNotifiedDeviation_ = dev;
+        tunerTransform->notifyChanged();
+    }
 
+    LatencyLog::markf("tunerMoved end (taps_rebuilt=%d notify=%d)",
+                      tapsRebuilt ? 1 : 0, notifyNeeded ? 1 : 0);
     emit repaint();
 }
 

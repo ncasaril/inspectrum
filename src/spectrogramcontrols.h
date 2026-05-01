@@ -26,6 +26,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QLabel>
 
 class SpectrogramControls : public QDockWidget
@@ -46,12 +47,37 @@ signals:
      * Requested number of threads to use for tile rendering.
      */
     void threadsChanged(int threads);
+    // Post-demod LPF cutoff (Hz) applied to all frequency plots. 0 = disabled.
+    void fmLpfChanged(double hz);
+    // Post-demod LPF implementation (matches FrequencyDemod::LpfMethod).
+    void fmLpfMethodChanged(int method);
+    // Block-averaging decimation factor applied after the FM demod. 1 = disabled.
+    void fmDecimChanged(int n);
+    // Pre-demod IQ decimation factor (1 = off). When set the FM demod
+    // chain runs at Fs/M (IQEngine pattern).
+    void fmPredemodDecimChanged(int m);
+    // User clicked "Auto-tune FM LPF" — PlotView picks values from the
+    // current Fs / tuner bandwidth, applies them, then echoes them back
+    // to applyAutoLpf so the dock widgets stay in sync.
+    void autoLpfRequested();
+    // Auto-period analysis on/off. Off = no scan, no label, no on-plot
+    // markers. On (default off) = continuous analysis after each view or
+    // filter change, label updates, and triangle/line overlay drawn on
+    // the FM trace.
+    void periodAnalysisChanged(bool enabled);
 
 public slots:
     void timeSelectionChanged(float time);
     void zoomIn();
     void zoomOut();
     void enableAnnotations(bool enabled);
+    void applyAutoLpf(double cutoffHz, int predemodM, int postN);
+    // Show the auto-detected period (in seconds) of the visible FM trace.
+    // periodSeconds <= 0 clears the label (no signal / not enough data).
+    void applyAutoPeriod(double periodSeconds);
+    // Show the sample value under the cursor when hovering over a derived
+    // plot. Empty string clears the label.
+    void applyCursorValue(QString text);
 
 private slots:
     void fftSizeChanged(int value);
@@ -80,6 +106,14 @@ public:
     QLabel *periodLabel;
     QLabel *symbolRateLabel;
     QLabel *symbolPeriodLabel;
+    // Auto-detected dominant period of the visible FM trace (zero-crossing
+    // estimate, updated whenever the view or filter changes).
+    QLabel *autoPeriodLabel;
+    // Toggle for the period analysis (label + on-plot markers). Off by
+    // default — the markers get noisy on broadband signals.
+    QCheckBox *periodAnalysisCheckBox;
+    // Sample value at the mouse cursor when hovering a derived plot.
+    QLabel *cursorValueLabel;
     QCheckBox *scalesCheckBox;
     QCheckBox *annosCheckBox;
     QCheckBox *annoLabelCheckBox;
@@ -92,4 +126,14 @@ public:
      * Spinbox to select number of threads for concurrent tasks.
      */
     QSpinBox   *threadCountSpinBox;
+    // FM post-demod LPF implementation (Kaiser FIR / Butterworth IIR / Elliptic IIR)
+    QComboBox  *fmLpfMethodCombo;
+    // FM post-demod LPF cutoff in Hz (0 disables)
+    QLineEdit  *fmLpfLineEdit;
+    // FM post-demod block-average decimation factor (1 disables)
+    QSpinBox   *fmDecimSpinBox;
+    // FM pre-demod IQ decimation (1 disables)
+    QSpinBox   *fmPredemodDecimSpinBox;
+    // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
+    QPushButton *fmAutoLpfButton;
 };

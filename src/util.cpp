@@ -18,6 +18,7 @@
  */
 
 #include "util.h"
+#include <cmath>
 
 std::string formatSIValue(float value)
 {
@@ -31,17 +32,27 @@ std::string formatSIValue(float value)
         { -9,   "n" },
     };
 
+    // Scale by magnitude only; preserve the sign so the result reads
+    // e.g. "-445k" rather than "-4.45e+14n" (negative values are always
+    // < 1.0 and would otherwise trigger the down-scale loop nine times).
+    if (value == 0.0f) {
+        std::stringstream ss;
+        ss << value;
+        return ss.str();
+    }
+    const float sign = std::signbit(value) ? -1.0f : 1.0f;
+    float mag = std::fabs(value);
     int power = 0;
-    while (value < 1.0f && power > -9) {
-        value *= 1e3;
+    while (mag < 1.0f && power > -9) {
+        mag *= 1e3;
         power -= 3;
     }
-    while (value >= 1e3 && power < 9) {
-        value *= 1e-3;
+    while (mag >= 1e3 && power < 9) {
+        mag *= 1e-3;
         power += 3;
     }
     std::stringstream ss;
-    ss << value << prefixes[power];
+    ss << (sign * mag) << prefixes[power];
     return ss.str();
 }
 

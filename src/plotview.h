@@ -22,6 +22,8 @@
 #include <QGraphicsView>
 #include <QPaintEvent>
 
+#include <QTimer>
+
 #include "cursors.h"
 #include "inputsource.h"
 #include "plot.h"
@@ -44,9 +46,19 @@ signals:
     /**
      * Emitted when the mouse moves over the plot area.
      * @param time     Time position in seconds corresponding to mouse X coordinate
-     * @param frequency  Frequency offset in Hz corresponding to mouse Y coordinate in spectrogram
+     * @param frequency  Frequency offset in Hz when the cursor is over the spectrogram (else 0)
+     * @param valueText  Pre-formatted sample-value string when the cursor is over a derived
+     *                   trace plot (e.g. "0.0042" for a float plot, "I=… Q=…" for IQ); empty
+     *                   when over the spectrogram or no readable plot.
      */
-    void mousePositionChanged(double time, double frequency);
+    void mousePositionChanged(double time, double frequency, QString valueText);
+    // Echoed after autoTuneFmLpf() picks values, so the dock widgets can
+    // be updated to reflect what was applied.
+    void fmAutoLpfComputed(double cutoffHz, int predemodM, int postN);
+    // Auto-detected dominant period (seconds) of the visible FM trace.
+    // Emitted after the analysis debounce timer fires. periodSeconds<=0
+    // means "no signal / not enough data".
+    void autoPeriodChanged(double periodSeconds);
 
 public slots:
     void cursorsMoved();
@@ -71,6 +83,21 @@ public slots:
      * Set maximum threads for background tile rendering.
      */
     void setMaxThreads(int threads);
+    // Cutoff (Hz) for the post-demod LPF on every FM plot. 0 disables.
+    void setFmLpfCutoff(double hz);
+    // LPF backend (matches FrequencyDemod::LpfMethod).
+    void setFmLpfMethod(int method);
+    // Block-average decimation factor on every FM plot. 1 disables.
+    void setFmDecimation(int n);
+    // Pre-demod IQ decimation factor (1 = off).
+    void setFmPredemodDecimation(int m);
+    // Pick reasonable LPF cutoff, predemod M, and post N from the current
+    // sample rate and tuner bandwidth. Applies them and emits
+    // fmAutoLpfComputed() so the dock widgets can mirror.
+    void autoTuneFmLpf();
+    // Toggle the period analyser. When off, no scan runs and any existing
+    // markers / period label are cleared.
+    void setPeriodAnalysisEnabled(bool enabled);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -105,6 +132,12 @@ private:
 
     void addPlot(Plot *plot);
     void emitTimeSelection();
+    // Read a single-sample value from a derived plot's source (FM/AM = float,
+    // IQ = complex<float>) and format for display in the status bar.
+    // rawValueOut, if non-null, also receives the unscaled float used to
+    // place the hover dot on the trace (NaN if no readable value).
+    QString sampleValueText(Plot *plot, size_t sampleIdx,
+                            double *rawValueOut = nullptr);
     void extractSymbols(std::shared_ptr<AbstractSampleSource> src, bool toClipboard);
     void exportSamples(std::shared_ptr<AbstractSampleSource> src);
     template<typename SOURCETYPE> void exportSamples(std::shared_ptr<AbstractSampleSource> src);
@@ -118,4 +151,16 @@ private:
     int sampleToColumn(size_t sample);
     size_t columnToSample(int col);
     int derivedPlotHeight;
+    // Debounced auto-period analyser: bumped from updateView() and from
+    // every FM-filter setter; fires once after a short idle so we don't
+    // re-scan the visible region on every scroll tick. Gated by
+    // periodAnalysisEnabled (off by default).
+    QTimer *periodTimer = nullptr;
+    bool   periodAnalysisEnabled = false;
+    void analyzeVisiblePeriod();
+    // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
+    double fmLpfCutoffHz = 0.0;
+    int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
+    int    fmDecim = 1;
+    int    fmPredemodDecim = 1;
 };

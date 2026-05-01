@@ -19,6 +19,7 @@
 
 #include "plotview.h"
 #include "frequencydemod.h"
+#include "util.h"
 #include <QPixmapCache>
 #include <iostream>
 #include <fstream>
@@ -26,6 +27,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDebug>
+#include <QWheelEvent>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -38,6 +40,7 @@
 #include <QToolTip>
 #include <QVBoxLayout>
 #include "plots.h"
+#include "latencylog.h"
 #include <QThreadPool>
 
 PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), derivedPlotHeight(200)
@@ -62,6 +65,16 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
     addPlot(spectrogramPlot);
 
     mainSampleSource->subscribe(this);
+
+    // Debounced re-analysis of the visible FM trace's dominant period.
+    // Restarted from updateView() and from every FM-filter setter so the
+    // dock label stays in sync with what the user sees, but only one scan
+    // runs per idle period.
+    periodTimer = new QTimer(this);
+    periodTimer->setSingleShot(true);
+    periodTimer->setInterval(200);
+    connect(periodTimer, &QTimer::timeout,
+            this, &PlotView::analyzeVisiblePeriod);
 }
 
 void PlotView::enableFastDemod(bool enabled)
@@ -86,6 +99,220 @@ void PlotView::setMaxThreads(int threads)
     // configure the global QThreadPool for QtConcurrent::run
     QThreadPool::globalInstance()->setMaxThreadCount(threads);
 }
+
+void PlotView::setFmLpfCutoff(double hz)
+{
+    fmLpfCutoffHz = hz;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostLpfCutoff(hz);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
+void PlotView::setFmDecimation(int n)
+{
+    if (n < 1) n = 1;
+    fmDecim = n;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostDecimation(n);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
+void PlotView::setFmLpfMethod(int method)
+{
+    fmLpfMethod = method;
+    auto m = static_cast<FrequencyDemod::LpfMethod>(method);
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPostLpfMethod(m);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
+void PlotView::setFmPredemodDecimation(int m)
+{
+    if (m < 1) m = 1;
+    fmPredemodDecim = m;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+                fd->setPredemodDecimation(m);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
+void PlotView::autoTuneFmLpf()
+{
+    if (!spectrogramPlot || sampleRate <= 0.0) return;
+    auto src = spectrogramPlot->output();
+    if (!src) return;
+    // relativeBandwidth is the tuner span as a fraction of Fs. It lives on
+    // SampleSource<T>, not AbstractSampleSource, so we have to cast — the
+    // tuner output is always complex<float>.
+    auto typed = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src);
+    double relBw = typed ? typed->relativeBandwidth() : 1.0;
+    if (relBw <= 0.0 || relBw > 1.0) relBw = 1.0;
+    const double tunerBw = relBw * sampleRate;
+
+    // Heuristic cutoff: tunerBw / 50 — captures the slowly-varying envelope
+    // of typical FM modulation while clamping to a usable range so very
+    // wide or very narrow tuners still get a sane number.
+    double cutoff = tunerBw / 50.0;
+    if (cutoff < 500.0)   cutoff = 500.0;
+    if (cutoff > 50000.0) cutoff = 50000.0;
+
+    // Pre-demod decimation must keep the freqdem's effective Nyquist above
+    // tunerBw — i.e. M ≤ 1/(2·relBw). Pick 80% of that for safety. Also
+    // bound by a useful-cutoff target (Fs/(4·fc)) so we don't decimate
+    // past what the post-LPF can take advantage of, and a hard ceiling to
+    // keep msresamp's per-stage halfband cost bounded.
+    int M_alias = std::max(1, static_cast<int>(std::floor(0.8 / (2.0 * relBw))));
+    int M_lpf   = std::max(1, static_cast<int>(std::floor(sampleRate / (4.0 * cutoff))));
+    int M = std::min({M_alias, M_lpf, 100});
+    int N = 1; // post-decim adds nothing once predemod decim is on
+
+    setFmLpfCutoff(cutoff);
+    setFmPredemodDecimation(M);
+    setFmDecimation(N);
+    emit fmAutoLpfComputed(cutoff, M, N);
+}
+
+void PlotView::setPeriodAnalysisEnabled(bool enabled)
+{
+    periodAnalysisEnabled = enabled;
+    if (enabled) {
+        if (periodTimer) periodTimer->start();
+    } else {
+        // Clear any existing markers and the dock label.
+        for (auto &plt : plots) {
+            if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+                tp->setPeriodMarkers({});
+            }
+        }
+        emit autoPeriodChanged(0.0);
+    }
+}
+
+void PlotView::analyzeVisiblePeriod()
+{
+    // Find the first derived float-source plot (FM trace by convention) and
+    // estimate its dominant period over the currently-visible sample range
+    // by counting upward crossings of the trace's mean (with hysteresis).
+    // Records each detected crossing point so TracePlot::paintFront can
+    // overlay markers + a connecting line.
+    if (!periodAnalysisEnabled || sampleRate <= 0.0) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    TracePlot *targetPlot = nullptr;
+    SampleSource<float> *fsrc = nullptr;
+    for (auto &plt : plots) {
+        auto tp = dynamic_cast<TracePlot*>(plt.get());
+        if (!tp) continue;
+        auto typed = std::dynamic_pointer_cast<SampleSource<float>>(tp->source());
+        if (typed) { fsrc = typed.get(); targetPlot = tp; break; }
+    }
+    if (!fsrc) {
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+
+    // Limit the analysis size — the FFT-free zero-crossing pass is O(N) and
+    // we just need a reasonable estimate, not microsecond precision.
+    constexpr size_t kMaxAnalyseSamples = 200000;
+    size_t n = viewRange.maximum > viewRange.minimum
+             ? (viewRange.maximum - viewRange.minimum) : 0;
+    if (n < 256) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    if (n > kMaxAnalyseSamples) n = kMaxAnalyseSamples;
+
+    auto data = fsrc->getSamples(viewRange.minimum, n);
+    if (!data) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+
+    double sum = 0.0;
+    size_t valid = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (std::isfinite(data[i])) { sum += data[i]; ++valid; }
+    }
+    if (valid < 256) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    const double mean = sum / valid;
+
+    double mn = std::numeric_limits<double>::infinity();
+    double mx = -std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(data[i])) continue;
+        if (data[i] < mn) mn = data[i];
+        if (data[i] > mx) mx = data[i];
+    }
+    const double span = mx - mn;
+    if (span <= 0.0) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    const double hyst = 0.1 * span;
+
+    // Each upward crossing of (data - mean) = 0 with hysteresis = one
+    // period boundary. Record the absolute sample index of each crossing
+    // so the plot can render markers.
+    std::vector<size_t> peaks;
+    bool armedLow = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(data[i])) continue;
+        const double d = data[i] - mean;
+        if (d < -hyst) armedLow = true;
+        else if (armedLow && d > hyst) {
+            peaks.push_back(viewRange.minimum + i);
+            armedLow = false;
+        }
+    }
+    if (peaks.size() < 2) {
+        if (targetPlot) targetPlot->setPeriodMarkers({});
+        emit autoPeriodChanged(0.0);
+        return;
+    }
+    // Period = (last peak time - first peak time) / (peaks - 1) — uses the
+    // span between detected peaks rather than the visible duration so an
+    // off-by-one near the edges doesn't bias the estimate.
+    const double dt = static_cast<double>(peaks.back() - peaks.front())
+                    / (peaks.size() - 1) / sampleRate;
+    if (targetPlot) targetPlot->setPeriodMarkers(std::move(peaks));
+    emit autoPeriodChanged(dt);
+}
+
 void PlotView::addPlot(Plot *plot)
 {
     plots.emplace_back(plot);
@@ -93,31 +320,117 @@ void PlotView::addPlot(Plot *plot)
     if (plots.size() > 1) {
         plot->setPlotHeight(derivedPlotHeight);
     }
+    // Propagate the currently-configured FM settings to any newly added FM plot.
+    if (auto tp = dynamic_cast<TracePlot*>(plot)) {
+        if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            fd->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
+            fd->setPostLpfCutoff(fmLpfCutoffHz);
+            fd->setPostDecimation(fmDecim);
+            fd->setPredemodDecimation(fmPredemodDecim);
+        }
+    }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
 
 void PlotView::mouseMoveEvent(QMouseEvent *event)
 {
     updateAnnotationTooltip(event);
-    // Emit current mouse position in time and frequency for status display
-    {
-        // Map X position to time (seconds)
-        int x = event->pos().x();
-        int hScroll = horizontalScrollBar()->value();
-        size_t sampleIdx = columnToSample(x + hScroll);
-        double timePos = (sampleRate > 0.0) ? (sampleIdx / sampleRate) : 0.0;
-        // Map Y position to frequency offset (Hz), with DC at center of spectrogram
-        double freqPos = 0.0;
+
+    int x = event->pos().x();
+    int y = event->pos().y();
+    int hScroll = horizontalScrollBar()->value();
+    size_t sampleIdx = columnToSample(x + hScroll);
+    double timePos = (sampleRate > 0.0) ? (sampleIdx / sampleRate) : 0.0;
+    int viewportH = viewport()->height();
+
+    double freqPos = 0.0;
+    QString valueText;
+
+    // Derived plots are stacked at the bottom of the viewport (each
+    // `derivedPlotHeight` tall). Top of the stack is at viewportH minus
+    // their total height. If the cursor is below that, it's over a derived
+    // plot — figure out which one, read its value, and push a hover-cursor
+    // overlay to that plot. Clear hover on every other derived plot so
+    // only the active one shows the marker.
+    const int derivedCount = static_cast<int>(plots.size()) - 1;
+    const int derivedTotalH = derivedCount * derivedPlotHeight;
+    const int derivedTop = viewportH - derivedTotalH;
+    int activePlotIdx = -1;
+    double hoverValue = std::numeric_limits<double>::quiet_NaN();
+    if (derivedCount > 0 && y >= derivedTop) {
+        const int posInDerived = y - derivedTop;
+        const int plotIdx = 1 + posInDerived / derivedPlotHeight;
+        if (plotIdx >= 1 && static_cast<size_t>(plotIdx) < plots.size()) {
+            activePlotIdx = plotIdx;
+            valueText = sampleValueText(plots[plotIdx].get(), sampleIdx, &hoverValue);
+        }
+    } else {
+        // Cursor is over the spectrogram (scrollable) — compute frequency
+        // offset from Y so the existing status-bar field stays correct.
         int vScroll = verticalScrollBar()->value();
-        int contentY = event->pos().y() + vScroll;
+        int contentY = y + vScroll;
         int plotH = spectrogramPlot->height();
         if (contentY >= 0 && contentY < plotH && sampleRate > 0.0) {
             double hzPerPixel = sampleRate / plotH;
             freqPos = ((plotH / 2.0) - contentY) * hzPerPixel;
         }
-        emit mousePositionChanged(timePos, freqPos);
     }
+
+    // Push hover state onto the active derived plot, clear all others.
+    for (size_t i = 1; i < plots.size(); ++i) {
+        if (auto tp = dynamic_cast<TracePlot*>(plots[i].get())) {
+            if (static_cast<int>(i) == activePlotIdx) {
+                tp->setHoverCursor(true, sampleIdx, hoverValue, valueText);
+            } else {
+                tp->setHoverCursor(false, 0, 0.0, QString());
+            }
+        }
+    }
+
+    emit mousePositionChanged(timePos, freqPos, valueText);
     QGraphicsView::mouseMoveEvent(event);
+}
+
+QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx, double *rawValueOut)
+{
+    if (rawValueOut) *rawValueOut = std::numeric_limits<double>::quiet_NaN();
+    auto tp = dynamic_cast<TracePlot*>(plot);
+    if (!tp) return QString();
+    auto src = tp->source();
+    if (!src) return QString();
+
+    // Float source. FrequencyDemod now scales its output to Hz at the
+    // source (see fillBatchCache / work in frequencydemod.cpp), so all the
+    // hover formatter has to do is detect "this is the FM trace" and
+    // append "Hz". The Y-axis labels read in Hz too — same value either
+    // way. AM and threshold are dimensionless w.r.t. the IQ scale, so
+    // show the raw float.
+    if (auto fsrc = std::dynamic_pointer_cast<SampleSource<float>>(src)) {
+        auto data = fsrc->getSamples(sampleIdx, 1);
+        if (!data) return QString();
+        float v = data[0];
+        if (rawValueOut) *rawValueOut = v;
+        if (!std::isfinite(v)) return QStringLiteral("NaN");
+        if (dynamic_cast<FrequencyDemod*>(src.get())) {
+            return QStringLiteral("%1Hz")
+                .arg(QString::fromStdString(formatSIValue(v)));
+        }
+        return QString::number(v, 'g', 6);
+    }
+    // Complex source (IQ plot): show I and Q plus magnitude.
+    if (auto csrc = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src)) {
+        auto data = csrc->getSamples(sampleIdx, 1);
+        if (!data) return QString();
+        float i = data[0].real();
+        float q = data[0].imag();
+        float mag = std::hypot(i, q);
+        if (rawValueOut) *rawValueOut = mag;
+        return QStringLiteral("I=%1 Q=%2 |·|=%3")
+            .arg(i, 0, 'g', 4)
+            .arg(q, 0, 'g', 4)
+            .arg(mag, 0, 'g', 4);
+    }
+    return QString();
 }
 
 void PlotView::mouseReleaseEvent(QMouseEvent *event)
@@ -160,6 +473,9 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
 
     Plot *selectedPlot = nullptr;
     size_t plotIndex = 0;
+    // Tuner Y for any new derived plot: -1 means "leave tuner alone" (e.g.
+    // the click was in an existing derived plot, not the spectrogram).
+    int tunerCentreY = -1;
     // Check if click is in derived plot area (fixed at bottom)
     if (plots.size() > 1 && clickY >= viewportH - derivedPlotHeight) {
         int posInDerived = clickY - (viewportH - derivedPlotHeight);
@@ -174,6 +490,7 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
             return;
         plotIndex = 0;
         selectedPlot = plots[0].get();
+        tunerCentreY = contentY;
     }
 
     // Compute center position for recentering
@@ -183,6 +500,30 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     QMenu *plotsMenu = menu.addMenu("Add derived plot");
     auto src = selectedPlot->output();
     auto compatiblePlots = as_range(Plots::plots.equal_range(src->sampleType()));
+    // Shortcut: add sample/amplitude/frequency as a single stacked set.
+    // Only offered when the source is complex<float> (the combo only makes
+    // sense for that sample type — the three creators all assume it).
+    if (src->sampleType() == typeid(std::complex<float>)) {
+        auto trioAction = new QAction(QStringLiteral("Add IQ + AM + FM"), plotsMenu);
+        connect(
+            trioAction, &QAction::triggered,
+            this, [=]() {
+                // Tune the spectrogram tuner to the click position so the
+                // new derived plots see the signal under the cursor.
+                if (tunerCentreY >= 0)
+                    spectrogramPlot->setTunerCentreY(tunerCentreY);
+                // Order: sample (IQ) first, amplitude (AM) second, frequency (FM) last
+                addPlot(Plots::samplePlot(src));
+                addPlot(Plots::amplitudePlot(src));
+                addPlot(Plots::frequencyPlot(src));
+                this->zoomSample = clickSample;
+                this->zoomPos = centerX;
+                this->updateView(true);
+            }
+        );
+        plotsMenu->addAction(trioAction);
+        plotsMenu->addSeparator();
+    }
     for (auto p : compatiblePlots) {
         auto plotInfo = p.second;
         auto action = new QAction(QString("Add %1").arg(plotInfo.name), plotsMenu);
@@ -190,6 +531,11 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         connect(
             action, &QAction::triggered,
             this, [=]() {
+                // Tune the spectrogram tuner to the click Y first; the new
+                // plot subscribes to tunerTransform so it picks up the new
+                // centre frequency on its first paint.
+                if (tunerCentreY >= 0)
+                    spectrogramPlot->setTunerCentreY(tunerCentreY);
                 // Add the new derived plot
                 addPlot(plotCreator(src));
                 // Re-center view so clickSample is at center
@@ -286,18 +632,21 @@ void PlotView::enableCursors(bool enabled)
 }
 
 bool PlotView::viewportEvent(QEvent *event) {
+    if (event->type() == QEvent::MouseMove) {
+        LatencyLog::mark("MouseMove ----------");
+    } else if (event->type() == QEvent::Wheel) {
+        LatencyLog::mark("Wheel ----------");
+    }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
-        QWheelEvent *wheelEvent = (QWheelEvent*)event;
+        QWheelEvent *wheelEvent = static_cast<QWheelEvent*>(event);
+        // Ctrl+wheel: horizontal zoom
         if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
             bool canZoomIn = zoomLevel < fftSize;
             bool canZoomOut = zoomLevel > -64;
             int delta = wheelEvent->angleDelta().y();
             if ((delta > 0 && canZoomIn) || (delta < 0 && canZoomOut)) {
                 scrollZoomStepsAccumulated += delta;
-
-                // `updateViewRange()` keeps the center sample in the same place after zoom. Apply
-                // a scroll adjustment to keep the sample under the mouse cursor in the same place instead.
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
                 zoomPos = wheelEvent->position().x();
 #else
@@ -313,6 +662,24 @@ bool PlotView::viewportEvent(QEvent *event) {
                 }
             }
             return true;
+        }
+        // No modifier: forward to plots for vertical zoom
+        {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+            int viewY = int(wheelEvent->position().y());
+#else
+            int viewY = wheelEvent->pos().y();
+#endif
+            int plotY = -verticalScrollBar()->value();
+            for (auto&& plot : plots) {
+                int ph = plot->height();
+                if (viewY >= plotY && viewY < plotY + ph) {
+                    if (plot->wheelEvent(wheelEvent))
+                        return true;
+                    break;
+                }
+                plotY += ph;
+            }
         }
     }
 
@@ -551,6 +918,7 @@ void PlotView::setPowerMax(int power)
 void PlotView::paintEvent(QPaintEvent *event)
 {
     if (mainSampleSource == nullptr) return;
+    LatencyLog::mark("paintEvent start");
 
     // Full viewport rectangle
     QRect viewRect(0, 0, width(), height());
@@ -581,13 +949,21 @@ void PlotView::paintEvent(QPaintEvent *event)
         paintTimeScale(painter, specRect, viewRange);
     }
 
-    // Draw derived plots in a fixed area at the bottom (always visible)
+    // Draw derived plots in a fixed area at the bottom (always visible).
+    // When the file ends before the viewport's right edge (zoomed-out short
+    // capture, or panned past EOF), viewRange is clamped to the file length
+    // by updateViewRange — so the actual content width is the pixel span of
+    // viewRange at the current zoom, not the full viewport. Stretching N
+    // samples across the full width here makes the derived plots disagree
+    // with the spectrogram column-for-column.
+    int contentWidth = std::min<int>(width(), sampleToColumn(viewRange.length()));
+    if (contentWidth < 1) contentWidth = 1;
     if (derivedHeight > 0) {
         // Back layer
         int y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintBack(painter, rect, viewRange);
             y += plot->height();
         }
@@ -595,7 +971,7 @@ void PlotView::paintEvent(QPaintEvent *event)
         y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintMid(painter, rect, viewRange);
             y += plot->height();
         }
@@ -603,11 +979,12 @@ void PlotView::paintEvent(QPaintEvent *event)
         y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintFront(painter, rect, viewRange);
             y += plot->height();
         }
     }
+    LatencyLog::mark("paintEvent end");
 }
 
 void PlotView::paintTimeScale(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
@@ -684,6 +1061,7 @@ size_t PlotView::samplesPerColumn()
 
 void PlotView::scrollContentsBy(int dx, int dy)
 {
+    LatencyLog::markf("scrollContentsBy dx=%d dy=%d", dx, dy);
     updateView();
 }
 
@@ -744,6 +1122,8 @@ void PlotView::updateView(bool reCenter, bool expanding)
 
     // Re-paint
     viewport()->update();
+    // Re-analyse the visible FM trace's period after the view settles.
+    if (periodTimer) periodTimer->start();
 }
 
 void PlotView::setSampleRate(double rate)

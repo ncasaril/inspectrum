@@ -61,6 +61,18 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fastDemodChanged, plots, &PlotView::enableFastDemod);
     // allow user to control number of threads in the Qt thread pool
     connect(dock, &SpectrogramControls::threadsChanged, plots, &PlotView::setMaxThreads);
+    // FM post-demod LPF cutoff, method, and block-average decimation
+    connect(dock, &SpectrogramControls::fmLpfChanged, plots, &PlotView::setFmLpfCutoff);
+    connect(dock, &SpectrogramControls::fmLpfMethodChanged, plots, &PlotView::setFmLpfMethod);
+    connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
+    connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
+    // Auto-tune button: dock asks PlotView, PlotView picks values and applies
+    // them, then echoes them back so the dock widgets reflect the new state.
+    connect(dock, &SpectrogramControls::autoLpfRequested, plots, &PlotView::autoTuneFmLpf);
+    connect(plots, &PlotView::fmAutoLpfComputed, dock, &SpectrogramControls::applyAutoLpf);
+    // Auto period-detection on the visible FM trace, fed into the dock label.
+    connect(plots, &PlotView::autoPeriodChanged, dock, &SpectrogramControls::applyAutoPeriod);
+    connect(dock, &SpectrogramControls::periodAnalysisChanged, plots, &PlotView::setPeriodAnalysisEnabled);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs
@@ -71,13 +83,19 @@ MainWindow::MainWindow()
     // Set defaults after making connections so everything is in sync
     dock->setDefaults();
     // Show cursor (mouse) position in time and frequency in the status bar
+    // *and* mirror the sample value under the cursor into the dock's
+    // "Cursor value:" label (the dock entry is the discoverable one; the
+    // status bar text is just a bonus for users used to looking down).
     connect(plots, &PlotView::mousePositionChanged,
-            this, [this](double timePos, double freqPos) {
-        // Format with 6 decimal places for time, frequency in Hz
+            this, [this](double timePos, double freqPos, QString valueText) {
         QString msg = QString("Time: %1 s   Freq: %2 Hz")
             .arg(timePos, 0, 'f', 6)
             .arg(freqPos, 0, 'f', 0);
+        if (!valueText.isEmpty()) {
+            msg += QStringLiteral("   Value: ") + valueText;
+        }
         statusBar()->showMessage(msg, 0);
+        this->dock->applyCursorValue(valueText);
     });
 
 }
@@ -103,6 +121,22 @@ void MainWindow::openFile(QString fileName)
         ss >> rate;
         if (!ss.fail()) {
             setSampleRate(rate);
+        }
+    }
+
+    // gqrx capture filename: gqrx_<YYYYMMDD>_<HHMMSS>_<centerfreqHz>_<sampleRateHz>_fc.raw
+    // Example: gqrx_20260429_031912_251580000_10000000_fc.raw
+    // Both fields are integer Hz, so a clean regex+toDouble round-trip works.
+    QRegExp gqrxRx("gqrx_\\d{8}_\\d{6}_(\\d+)_(\\d+)_fc\\.raw");
+    if (gqrxRx.exactMatch(basename)) {
+        bool ok = false;
+        double centerHz = gqrxRx.cap(1).toDouble(&ok);
+        if (ok && centerHz > 0.0) {
+            input->setCenterFrequency(centerHz);
+        }
+        double rateHz = gqrxRx.cap(2).toDouble(&ok);
+        if (ok && rateHz > 0.0) {
+            setSampleRate(rateHz);
         }
     }
 
@@ -136,14 +170,24 @@ void MainWindow::setSampleRate(QString rate)
     input->setSampleRate(sampleRate);
     plots->setSampleRate(sampleRate);
 
-    // Save the sample rate in settings as we're likely to be opening the same file across multiple runs
-    QSettings settings;
-    settings.setValue("SampleRate", sampleRate);
+    // Save the sample rate in settings as we're likely to be opening the same
+    // file across multiple runs. Skip the save if the value is bogus (≤ 0):
+    // a transient zero (cleared text field, in-flight typing) used to poison
+    // QSettings and turn FrequencyDemod's Hz scaling into "multiply by 0",
+    // which made the FM plot a flat line on the next launch with no obvious
+    // cause.
+    if (sampleRate > 0.0) {
+        QSettings settings;
+        settings.setValue("SampleRate", sampleRate);
+    }
 }
 
 void MainWindow::setSampleRate(double rate)
 {
-    dock->sampleRate->setText(QString::number(rate));
+    // 'g' format (the QString::number default) switches to scientific at 7+
+    // digits, so 10 MHz renders as "1e+07" and looks to the user like the
+    // rate didn't parse. Display sample rates as plain integers in Hz.
+    dock->sampleRate->setText(QString::number(rate, 'f', 0));
 }
 
 void MainWindow::setFormat(QString fmt)

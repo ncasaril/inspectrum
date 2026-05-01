@@ -27,8 +27,15 @@
 template <typename Tin, typename Tout>
 class SampleBuffer : public SampleSource<Tout>, public Subscriber
 {
-private:
+protected:
+    // Upstream source. Exposed to subclasses so they can override
+    // getSamples and pull a different range (e.g. a batched window for
+    // non-composable filters like IIR filtfilt) without going through the
+    // standard per-tile work() pattern.
     std::shared_ptr<SampleSource<Tin>> src;
+    // Protects work() state (and, by extension, anything work() reads).
+    // Setters in subclasses that mutate that state should lock this mutex
+    // too so they can't race with scans running on worker threads.
     QMutex mutex;
 
 public:
@@ -47,4 +54,9 @@ public:
     float relativeBandwidth() {
         return src->relativeBandwidth();
     }
+    // Number of pre-history samples getSamples() fetches and discards so
+    // subclasses can warm their internal filters before producing real output.
+    // Override if a transform needs more than the default 256-sample lead-in
+    // (e.g., a long FIR whose impulse response exceeds it).
+    virtual size_t historySize() { return 256; }
 };

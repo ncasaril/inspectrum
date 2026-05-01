@@ -24,6 +24,7 @@
 #include <QSettings>
 #include <QLabel>
 #include <cmath>
+#include <string>
 #include "util.h"
 
 SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent)
@@ -109,6 +110,26 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     // Derived plots settings
     layout->addRow(new QLabel()); // spacer
     layout->addRow(new QLabel(tr("<b>Derived Plots</b>")));
+    autoPeriodLabel = new QLabel(QStringLiteral("—"));
+    autoPeriodLabel->setToolTip(tr(
+        "Auto-detected dominant period of the visible FM trace, estimated "
+        "from zero-crossings around the trace's mean. Updates as you pan, "
+        "zoom or change filter settings."));
+    layout->addRow(new QLabel(tr("Auto period:")), autoPeriodLabel);
+    periodAnalysisCheckBox = new QCheckBox(widget);
+    periodAnalysisCheckBox->setCheckState(Qt::Unchecked);
+    periodAnalysisCheckBox->setToolTip(tr(
+        "Run the period analyser and draw peak markers on the FM trace. "
+        "Disabled by default because the markers can be hectic on noisy "
+        "signals."));
+    layout->addRow(new QLabel(tr("Period markers:")), periodAnalysisCheckBox);
+    connect(periodAnalysisCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::periodAnalysisChanged);
+    cursorValueLabel = new QLabel(QStringLiteral("—"));
+    cursorValueLabel->setToolTip(tr(
+        "Sample value at the mouse cursor when hovering over a derived "
+        "trace plot. Float for FM/AM/threshold, I+Q+|·| for IQ."));
+    layout->addRow(new QLabel(tr("Cursor value:")), cursorValueLabel);
     derivedPlotHeightSpinBox = new QSpinBox(widget);
     derivedPlotHeightSpinBox->setRange(20, 1000);
     derivedPlotHeightSpinBox->setValue(200);
@@ -128,6 +149,61 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("Threads:")), threadCountSpinBox);
     connect(threadCountSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::threadsChanged);
+    // FM post-demod LPF method. Kept as a picker so the slow-but-accurate
+    // Kaiser FIR is still available for A/B comparison against the IIR
+    // alternatives. Order here must match FrequencyDemod::LpfMethod.
+    fmLpfMethodCombo = new QComboBox(widget);
+    fmLpfMethodCombo->addItem(tr("Kaiser FIR"));
+    fmLpfMethodCombo->addItem(tr("Butterworth IIR (filtfilt)"));
+    fmLpfMethodCombo->setCurrentIndex(0); // default = Kaiser FIR (linear-phase, accurate)
+    layout->addRow(new QLabel(tr("FM LPF method:")), fmLpfMethodCombo);
+    connect(fmLpfMethodCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::fmLpfMethodChanged);
+    // FM post-demod LPF cutoff (Hz). 0 = disabled.
+    fmLpfLineEdit = new QLineEdit(widget);
+    auto fmLpfValidator = new QDoubleValidator(0.0, 1e9, 3, this);
+    fmLpfLineEdit->setValidator(fmLpfValidator);
+    fmLpfLineEdit->setText("0");
+    layout->addRow(new QLabel(tr("FM LPF cutoff (Hz):")), fmLpfLineEdit);
+    // Fire only on editingFinished (Enter pressed or focus leaves the field)
+    // so we don't rebuild the Kaiser LPF on every keystroke.
+    connect(fmLpfLineEdit, &QLineEdit::editingFinished, this, [this]() {
+        bool ok;
+        double hz = fmLpfLineEdit->text().toDouble(&ok);
+        if (ok) emit fmLpfChanged(hz);
+    });
+    // FM pre-demod IQ decimation factor (M). 1 = off; M>1 routes the chain
+    // through a polyphase decimator → freqdem at Fs/M → LPF at Fs/M → hold.
+    fmPredemodDecimSpinBox = new QSpinBox(widget);
+    fmPredemodDecimSpinBox->setRange(1, 1000);
+    fmPredemodDecimSpinBox->setValue(1);
+    fmPredemodDecimSpinBox->setToolTip(tr(
+        "Decimate the IQ stream by M before the FM demod (IQEngine pattern). "
+        "M=1 disables; M>1 keeps the post-LPF in a numerically clean regime."));
+    layout->addRow(new QLabel(tr("FM predemod decim (M):")), fmPredemodDecimSpinBox);
+    connect(fmPredemodDecimSpinBox,
+            static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::fmPredemodDecimChanged);
+    // FM post-demod block-average decimation factor. 1 = disabled.
+    fmDecimSpinBox = new QSpinBox(widget);
+    fmDecimSpinBox->setRange(1, 4096);
+    fmDecimSpinBox->setValue(1);
+    layout->addRow(new QLabel(tr("FM decim (N):")), fmDecimSpinBox);
+    connect(fmDecimSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::fmDecimChanged);
+
+    // Auto-tune button: ask PlotView to pick reasonable values for cutoff,
+    // predemod M, and post N. PlotView computes from current Fs and tuner
+    // bandwidth, applies via the existing setters, and echoes the values
+    // back via applyAutoLpf so these widgets stay in sync.
+    fmAutoLpfButton = new QPushButton(tr("Auto-tune FM LPF"), widget);
+    fmAutoLpfButton->setToolTip(tr(
+        "Pick reasonable values for FM LPF cutoff, predemod decimation (M), "
+        "and post decimation (N) from the current sample rate and tuner "
+        "bandwidth."));
+    layout->addRow(fmAutoLpfButton);
+    connect(fmAutoLpfButton, &QPushButton::clicked,
+            this, &SpectrogramControls::autoLpfRequested);
 
     widget->setLayout(layout);
     setWidget(widget);
@@ -166,9 +242,16 @@ void SpectrogramControls::setDefaults()
     annoLabelCheckBox->setCheckState(Qt::Checked);
     annoColorCheckBox->setCheckState(Qt::Checked);
 
-    // Try to set the sample rate from the last-used value
+    // Try to set the sample rate from the last-used value. Sanity-check the
+    // loaded value: a missing/zero setting means "no useful rate was ever
+    // saved", in which case fall back to 8 MHz rather than starting at 0
+    // (FrequencyDemod skips its Hz scaling at rate=0, but downstream UI
+    // — time scale, hover, period analyser — are all degraded with rate=0,
+    // and an obvious sane default lets the user see something instead of a
+    // flat trace).
     QSettings settings;
     int savedSampleRate = settings.value("SampleRate", 8000000).toInt();
+    if (savedSampleRate <= 0) savedSampleRate = 8000000;
     sampleRate->setText(QString::number(savedSampleRate));
     fftSizeSlider->setValue(settings.value("FFTSize", 9).toInt());
     powerMaxSlider->setValue(settings.value("PowerMax", 0).toInt());
@@ -224,7 +307,8 @@ void SpectrogramControls::fileOpenButtonClicked()
                 "complex<float> file (*.cfile *.cf32 *.fc32);;"
                 "complex<int8> HackRF file (*.cs8 *.sc8 *.c8);;"
                 "complex<int16> Fancy file (*.cs16 *.sc16 *.c16);;"
-                "complex<uint8> RTL-SDR file (*.cu8 *.uc8)"));
+                "complex<uint8> RTL-SDR file (*.cu8 *.uc8);;"
+                "Rohde & Schwarz iq.tar (*.iq.tar)"));
 
     // Try and load a saved state
     {
@@ -276,4 +360,34 @@ void SpectrogramControls::zoomOut()
 void SpectrogramControls::enableAnnotations(bool enabled) {
     // disable annotation comments checkbox when annotations are disabled
     commentsCheckBox->setEnabled(enabled);
+}
+
+void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN)
+{
+    // Mirror the PlotView-computed values back into the widgets. The
+    // QSpinBox setValue calls fire valueChanged → re-apply via PlotView's
+    // setters; that's idempotent (the setter sees the same value and is
+    // a no-op). For the QLineEdit we have to emit fmLpfChanged manually
+    // because editingFinished doesn't fire on programmatic setText().
+    fmLpfLineEdit->setText(QString::number(cutoffHz, 'f', 0));
+    emit fmLpfChanged(cutoffHz);
+    fmPredemodDecimSpinBox->setValue(predemodM);
+    fmDecimSpinBox->setValue(postN);
+}
+
+void SpectrogramControls::applyAutoPeriod(double periodSeconds)
+{
+    if (periodSeconds <= 0.0 || !std::isfinite(periodSeconds)) {
+        autoPeriodLabel->setText(QStringLiteral("—"));
+        return;
+    }
+    const double freq = 1.0 / periodSeconds;
+    autoPeriodLabel->setText(
+        QString::fromStdString(formatSIValue(periodSeconds)) + QStringLiteral("s  (")
+        + QString::fromStdString(formatSIValue(freq)) + QStringLiteral("Hz)"));
+}
+
+void SpectrogramControls::applyCursorValue(QString text)
+{
+    cursorValueLabel->setText(text.isEmpty() ? QStringLiteral("—") : text);
 }

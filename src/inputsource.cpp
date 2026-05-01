@@ -23,9 +23,11 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include <stdexcept>
 #include <algorithm>
+#include <vector>
 
 #include <QFileInfo>
 
@@ -39,6 +41,7 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QColor>
+#include <QXmlStreamReader>
 
 
 class ComplexF32SampleAdapter : public SampleAdapter {
@@ -220,6 +223,63 @@ public:
     }
 };
 
+namespace {
+
+// Rohde & Schwarz .iq.tar support: a USTAR archive that bundles a raw IQ
+// data file and an XML manifest. The manifest describes the format, sample
+// rate, center frequency, etc. We parse the tar in-place (it is already
+// mmap'd) so the sample-path reads can proceed at the data file's byte
+// offset with no extra copy.
+
+struct TarEntry {
+    QString name;
+    qint64 dataOffset;
+    qint64 size;
+};
+
+static qint64 tarOctal(const char *buf, size_t len)
+{
+    // Tar numeric fields are zero- or space-padded octal ASCII, usually
+    // null- or space-terminated. strtoll would choke on trailing junk, so
+    // copy into a local null-terminated buffer and parse there.
+    char tmp[32];
+    size_t n = std::min(len, sizeof(tmp) - 1);
+    memcpy(tmp, buf, n);
+    tmp[n] = 0;
+    return strtoll(tmp, nullptr, 8);
+}
+
+static std::vector<TarEntry> parseTar(const uchar *data, qint64 totalSize)
+{
+    std::vector<TarEntry> entries;
+    qint64 pos = 0;
+    while (pos + 512 <= totalSize) {
+        const char *hdr = reinterpret_cast<const char*>(data + pos);
+        bool allZero = true;
+        for (int i = 0; i < 512; ++i) { if (hdr[i]) { allZero = false; break; } }
+        if (allZero) break;
+
+        // Name: 100 bytes, null-terminated; use memchr to stay within the field
+        const char *nul = static_cast<const char*>(memchr(hdr, 0, 100));
+        int nameLen = nul ? static_cast<int>(nul - hdr) : 100;
+        QString name = QString::fromUtf8(hdr, nameLen);
+
+        qint64 sz = tarOctal(hdr + 124, 12);
+        char typeflag = hdr[156];
+
+        qint64 dataStart = pos + 512;
+        // Only regular files ('0' in ustar, '\0' in very old tar) carry data
+        // we care about; skip directories, links, etc.
+        if (typeflag == '0' || typeflag == '\0') {
+            entries.push_back({name, dataStart, sz});
+        }
+        pos = dataStart + ((sz + 511) / 512) * 512;
+    }
+    return entries;
+}
+
+} // namespace
+
 InputSource::InputSource()
 {
 }
@@ -364,11 +424,126 @@ QJsonObject InputSource::readMetaData(const QString &filename)
     return root;
 }
 
+void InputSource::openIqTar(const uchar *data, qint64 size)
+{
+    auto entries = parseTar(data, size);
+
+    const TarEntry *xmlEntry = nullptr;
+    for (const auto &e : entries) {
+        if (e.name.endsWith(".xml", Qt::CaseInsensitive)) { xmlEntry = &e; break; }
+    }
+    if (!xmlEntry)
+        throw std::runtime_error("iq.tar: no XML manifest found in archive");
+
+    QByteArray xmlBytes(reinterpret_cast<const char*>(data + xmlEntry->dataOffset),
+                        static_cast<int>(xmlEntry->size));
+    QXmlStreamReader xml(xmlBytes);
+
+    QString dataFilename, format, dataType;
+    int numChannels = 1;
+    double clock = 0.0;
+    double centerFreq = 0.0;
+    qint64 xmlSamples = 0;
+
+    while (!xml.atEnd() && !xml.hasError()) {
+        xml.readNext();
+        if (!xml.isStartElement()) continue;
+        auto name = xml.name().toString();
+        if      (name == "DataFilename")     dataFilename = xml.readElementText();
+        else if (name == "Clock")            clock = xml.readElementText().toDouble();
+        else if (name == "Samples")          xmlSamples = xml.readElementText().toLongLong();
+        else if (name == "Format")           format = xml.readElementText();
+        else if (name == "DataType")         dataType = xml.readElementText();
+        else if (name == "NumberOfChannels") numChannels = xml.readElementText().toInt();
+        else if (name == "CenterFrequency") {
+            bool ok;
+            double cf = xml.readElementText().toDouble(&ok);
+            if (ok) centerFreq = cf;
+        }
+    }
+    if (xml.hasError())
+        throw std::runtime_error(("iq.tar: XML parse error: " + xml.errorString()).toStdString());
+    if (dataFilename.isEmpty())
+        throw std::runtime_error("iq.tar: XML manifest is missing <DataFilename>");
+    if (numChannels != 1)
+        throw std::runtime_error("iq.tar: multi-channel archives are not supported");
+
+    const TarEntry *dataEntry = nullptr;
+    for (const auto &e : entries) {
+        if (e.name == dataFilename) { dataEntry = &e; break; }
+    }
+    if (!dataEntry)
+        throw std::runtime_error(("iq.tar: data file '" + dataFilename +
+                                  "' referenced by manifest not found in archive").toStdString());
+
+    const QString fmtL = format.toLower();
+    const QString dtL  = dataType.toLower();
+    _realSignal = false;
+    if (fmtL == "complex" && dtL == "float32") {
+        sampleAdapter = std::make_unique<ComplexF32SampleAdapter>();
+    } else if (fmtL == "complex" && dtL == "int32") {
+        sampleAdapter = std::make_unique<ComplexS32SampleAdapter>();
+    } else if (fmtL == "complex" && dtL == "int16") {
+        sampleAdapter = std::make_unique<ComplexS16SampleAdapter>();
+    } else if (fmtL == "real" && dtL == "float32") {
+        sampleAdapter = std::make_unique<RealF32SampleAdapter>();
+        _realSignal = true;
+    } else if (fmtL == "real" && dtL == "int16") {
+        sampleAdapter = std::make_unique<RealS16SampleAdapter>();
+        _realSignal = true;
+    } else {
+        throw std::runtime_error(("iq.tar: unsupported Format/DataType combination: " +
+                                  format + "/" + dataType).toStdString());
+    }
+
+    dataOffset = static_cast<size_t>(dataEntry->dataOffset);
+    size_t derivedCount = dataEntry->size / sampleAdapter->sampleSize();
+    // Trust the raw tar entry size over the XML Samples count: NumberOfPreSamples
+    // and NumberOfPostSamples (which we don't separate out here) can make the
+    // two disagree, and the entry size is what actually sits on disk.
+    sampleCount = derivedCount > 0 ? derivedCount : static_cast<size_t>(xmlSamples);
+    if (clock > 0.0) sampleRate = clock;
+    frequency = centerFreq;
+}
+
 void InputSource::openFile(const char *filename)
 {
     QFileInfo fileInfo(filename);
     std::string suffix = std::string(fileInfo.suffix().toLower().toUtf8().constData());
     if (_fmt != "") { suffix = _fmt; } // allow fmt override
+
+    // Default to no container offset; openIqTar overrides this for archives.
+    dataOffset = 0;
+
+    // R&S iq.tar container — delegate to openIqTar which discovers format,
+    // sample rate, center frequency, and the offset of the raw data file
+    // within the mmap'd archive.
+    if (_fmt.empty() && fileInfo.fileName().endsWith(".iq.tar", Qt::CaseInsensitive)) {
+        auto file = std::make_unique<QFile>(filename);
+        if (!file->open(QFile::ReadOnly)) {
+            throw std::runtime_error(file->errorString().toStdString());
+        }
+        qint64 size = file->size();
+        uchar *data = file->map(0, size);
+        if (data == nullptr)
+            throw std::runtime_error("Error mmapping iq.tar file");
+
+        annotationList.clear();
+        dataOffset = 0;
+        try {
+            openIqTar(data, size);
+        } catch (...) {
+            file->unmap(data);
+            throw;
+        }
+
+        cleanup();
+        inputFile = file.release();
+        mmapData = data;
+        invalidate();
+        return;
+    }
+
     if ((suffix == "cfile") || (suffix == "cf32")  || (suffix == "fc32")) {
         sampleAdapter = std::make_unique<ComplexF32SampleAdapter>();
     }
@@ -467,6 +642,16 @@ void InputSource::setSampleRate(double rate)
     invalidate();
 }
 
+void InputSource::setCenterFrequency(double freq)
+{
+    // `frequency` lives on SampleSource<T> and is the value the spectrogram's
+    // frequency axis labels reference (and what derived plots read via
+    // getFrequency()). Auto-init paths (gqrx filenames, etc.) call this so
+    // the axis reads true Hz instead of "0 Hz" baseband.
+    frequency = freq;
+    invalidate();
+}
+
 double InputSource::rate()
 {
     return sampleRate;
@@ -487,7 +672,7 @@ std::unique_ptr<std::complex<float>[]> InputSource::getSamples(size_t start, siz
         return nullptr;
 
     auto dest = std::make_unique<std::complex<float>[]>(length);
-    sampleAdapter->copyRange(mmapData, start, length, dest.get());
+    sampleAdapter->copyRange(mmapData + dataOffset, start, length, dest.get());
 
     return dest;
 }
