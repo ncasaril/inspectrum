@@ -61,6 +61,7 @@ public:
         return sampleCount;
     };
     void setSampleRate(double rate);
+    void setCenterFrequency(double freq);
     void setFormat(std::string fmt);
     double rate();
     bool realSignal() {

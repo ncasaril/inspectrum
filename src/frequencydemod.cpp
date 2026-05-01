@@ -117,13 +117,17 @@ size_t FrequencyDemod::historySize()
 
 void FrequencyDemod::invalidateBatchCache()
 {
-    QMutexLocker ml(&batchMutex_);
-    batchCache_.valid = false;
-    batchCache_.length = 0;
-    batchCache_.startSample = 0;
-    // Drop the buffer so we don't hang onto megabytes after a parameter
-    // change — the next request will repopulate.
-    std::vector<float>().swap(batchCache_.data);
+    // Non-blocking: bump the cache epoch atomically. Any in-flight
+    // fillBatchCache() snapshotted the previous epoch at entry and will
+    // commit under it; getSamples's covers check rejects results tagged
+    // with an older epoch, so the next request triggers a fresh fill.
+    //
+    // Previously this took batchMutex_ to clear the cache fields, which
+    // meant every tuner drag (which fans into invalidateEvent → here)
+    // blocked on the worker's mutex for the full duration of fillBatchCache
+    // — visible in the latency trace as 100+ ms tunerMoved hangs. The old
+    // batch buffer lingers until the next fill replaces it; that's fine.
+    cacheEpoch_.fetch_add(1, std::memory_order_release);
 }
 
 void FrequencyDemod::invalidateEvent()
@@ -369,6 +373,14 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     // hit the cache cheaply, and so the filtfilt has plenty of margin on
     // both sides for its forward and reverse passes to settle outside the
     // visible region.
+    //
+    // Snapshot the epoch at entry: if a non-blocking invalidate fires while
+    // we're computing, our committed result will carry the stale epoch and
+    // be rejected by the next getSamples covers check. The fill still runs
+    // to completion (we don't try to abort) — the wasted compute is the
+    // cost of letting invalidate skip the mutex wait.
+    const uint64_t fillEpoch = cacheEpoch_.load(std::memory_order_acquire);
+
     const size_t total = count();
     if (needEnd > total) needEnd = total;
     if (needStart >= needEnd) return false;
@@ -574,8 +586,9 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     // this at the source means the plot's Y-axis labels read in Hz and
     // the hover value just appends "Hz" — no double-conversion anywhere.
     // Cheap mode (phase-diff path) gives `arg` per sample which is
-    // already 2π·f/Fs, so its Hz scale is Fs/(2π) instead.
-    {
+    // already 2π·f/Fs, so its Hz scale is Fs/(2π) instead. Skip when fs=0
+    // (sample rate not yet set / bogus settings) so the trace isn't zeroed.
+    if (fs > 0.0) {
         const double scale = cheap
             ? (fs / (2.0 * M_PI))
             : (0.49 * fs);
@@ -607,6 +620,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     batchCache_.rate        = fs;
     batchCache_.cheap       = cheap;
     batchCache_.decim       = decim;
+    batchCache_.epoch       = fillEpoch;
 
     FmLog::instance().writef(
         "fillBatchCache: method=%s cutoffHz=%.3f decim=%d fsEff=%.0f "
@@ -646,7 +660,9 @@ std::unique_ptr<float[]> FrequencyDemod::getSamples(size_t start, size_t length)
     // a single continuous filtfilt (and a single decimator+demod when
     // pre-demod decimation is enabled).
     QMutexLocker ml(&batchMutex_);
+    const uint64_t nowEpoch = cacheEpoch_.load(std::memory_order_acquire);
     const bool covers = batchCache_.valid &&
+                        batchCache_.epoch    == nowEpoch &&
                         batchCache_.method   == method &&
                         batchCache_.cutoffHz == cutoffHz &&
                         batchCache_.decim    == decim &&
@@ -732,12 +748,22 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
     // Scale to instantaneous frequency in Hz (see fillBatchCache for the
     // matching scaling on the batched path). Y-axis labels and the hover
     // value both read in Hz from this point on.
+    //
+    // Guard: rate() can legitimately be 0 if the user opens a file without
+    // setting a sample rate (or with a bad SampleRate in QSettings). In that
+    // case, fall back to no scaling — the trace will show liquid's normalised
+    // m values in [-1, 1], which is exactly what the chain produced before
+    // the Hz-scaling commit. Multiplying by 0 here would zero the entire
+    // output and the user would see a flat-line FM trace with no clue why.
     {
-        const double scale = cheapMode_
-            ? (rate() / (2.0 * M_PI))
-            : (0.49 * rate());
-        const float scalef = static_cast<float>(scale);
-        for (int i = 0; i < count; ++i) out[i] *= scalef;
+        const double r = rate();
+        if (r > 0.0) {
+            const double scale = cheapMode_
+                ? (r / (2.0 * M_PI))
+                : (0.49 * r);
+            const float scalef = static_cast<float>(scale);
+            for (int i = 0; i < count; ++i) out[i] *= scalef;
+        }
     }
 
     // Stats after the LPF (still pre-NaN-mark) so we can see what the filter

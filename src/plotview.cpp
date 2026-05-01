@@ -40,6 +40,7 @@
 #include <QToolTip>
 #include <QVBoxLayout>
 #include "plots.h"
+#include "latencylog.h"
 #include <QThreadPool>
 
 PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), derivedPlotHeight(200)
@@ -631,6 +632,11 @@ void PlotView::enableCursors(bool enabled)
 }
 
 bool PlotView::viewportEvent(QEvent *event) {
+    if (event->type() == QEvent::MouseMove) {
+        LatencyLog::mark("MouseMove ----------");
+    } else if (event->type() == QEvent::Wheel) {
+        LatencyLog::mark("Wheel ----------");
+    }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
         QWheelEvent *wheelEvent = static_cast<QWheelEvent*>(event);
@@ -912,6 +918,7 @@ void PlotView::setPowerMax(int power)
 void PlotView::paintEvent(QPaintEvent *event)
 {
     if (mainSampleSource == nullptr) return;
+    LatencyLog::mark("paintEvent start");
 
     // Full viewport rectangle
     QRect viewRect(0, 0, width(), height());
@@ -942,13 +949,21 @@ void PlotView::paintEvent(QPaintEvent *event)
         paintTimeScale(painter, specRect, viewRange);
     }
 
-    // Draw derived plots in a fixed area at the bottom (always visible)
+    // Draw derived plots in a fixed area at the bottom (always visible).
+    // When the file ends before the viewport's right edge (zoomed-out short
+    // capture, or panned past EOF), viewRange is clamped to the file length
+    // by updateViewRange — so the actual content width is the pixel span of
+    // viewRange at the current zoom, not the full viewport. Stretching N
+    // samples across the full width here makes the derived plots disagree
+    // with the spectrogram column-for-column.
+    int contentWidth = std::min<int>(width(), sampleToColumn(viewRange.length()));
+    if (contentWidth < 1) contentWidth = 1;
     if (derivedHeight > 0) {
         // Back layer
         int y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintBack(painter, rect, viewRange);
             y += plot->height();
         }
@@ -956,7 +971,7 @@ void PlotView::paintEvent(QPaintEvent *event)
         y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintMid(painter, rect, viewRange);
             y += plot->height();
         }
@@ -964,11 +979,12 @@ void PlotView::paintEvent(QPaintEvent *event)
         y = viewRect.height() - derivedHeight;
         for (size_t i = 1; i < plots.size(); ++i) {
             Plot *plot = plots[i].get();
-            QRect rect(0, y, width(), plot->height());
+            QRect rect(0, y, contentWidth, plot->height());
             plot->paintFront(painter, rect, viewRange);
             y += plot->height();
         }
     }
+    LatencyLog::mark("paintEvent end");
 }
 
 void PlotView::paintTimeScale(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
@@ -1045,6 +1061,7 @@ size_t PlotView::samplesPerColumn()
 
 void PlotView::scrollContentsBy(int dx, int dy)
 {
+    LatencyLog::markf("scrollContentsBy dx=%d dy=%d", dx, dy);
     updateView();
 }
 

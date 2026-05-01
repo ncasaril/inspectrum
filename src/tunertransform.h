@@ -20,11 +20,21 @@
 #pragma once
 
 #include "samplebuffer.h"
+#include <QMutex>
 #include <vector>
 
 class TunerTransform : public SampleBuffer<std::complex<float>, std::complex<float>>
 {
 private:
+    // Tuner parameters get a dedicated short-hold mutex distinct from
+    // SampleBuffer's `mutex`. The base class holds `mutex` for the entire
+    // duration of every work() call (which can be hundreds of ms over a
+    // wide sample range), so reusing it for the GUI-thread setters means
+    // a tuner drag stalls behind in-flight workers — visible in the
+    // latency trace as 300-700 ms tunerMoved hangs. work() snapshots the
+    // params under paramMutex_ at the top and drops the lock immediately;
+    // setters do the same.
+    mutable QMutex paramMutex_;
     float frequency;
     float bandwidth;
     std::vector<float> taps;

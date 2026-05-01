@@ -21,6 +21,8 @@
 #include <liquid/liquid.h>
 
 #include <QMutex>
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "samplebuffer.h"
@@ -120,9 +122,15 @@ private:
         double       rate = 0.0;
         bool         cheap = false;
         int          decim = 1;
+        // Bumped by invalidateBatchCache() (non-blocking, atomic). A cache
+        // committed under an older epoch is rejected by getSamples's covers
+        // check — no need to take batchMutex_ to invalidate, which used to
+        // stall the GUI thread for the duration of any in-flight fill.
+        uint64_t     epoch = 0;
     };
-    QMutex      batchMutex_;
-    BatchCache  batchCache_;
+    QMutex                batchMutex_;
+    BatchCache            batchCache_;
+    std::atomic<uint64_t> cacheEpoch_{1};
     void invalidateBatchCache();
     bool fillBatchCache(size_t needStart, size_t needEnd);
 };

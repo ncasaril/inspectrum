@@ -30,6 +30,7 @@
 
 #include <memory>
 #include <array>
+#include <limits>
 #include <math.h>
 #include <vector>
 
@@ -95,6 +96,22 @@ private:
 
     Tuner tuner;
     std::shared_ptr<TunerTransform> tunerTransform;
+
+    // Tap-design memo: liquid_firdes_kaiser is the dominant per-frame cost
+    // during a tuner drag (an O(N²) Bessel evaluation for narrow cutoffs)
+    // but only depends on the inputs below — pure centre-frequency drags
+    // don't change them, so we skip the redesign entirely when nothing's
+    // moved. -1 sentinel forces a fresh design on the first call.
+    int   lastTapsDeviation_ = -1;
+    int   lastTapsFftSize_   = -1;
+    float lastTapsPowerMax_  = std::numeric_limits<float>::quiet_NaN();
+    // Track the (frequency, deviation) the downstream chain was last told
+    // about so we can skip the invalidate fan-out when neither actually
+    // moved. Prevents Tuner::tunerMoved emits with no real change (e.g.
+    // mouse release within the same pixel after a drag) from triggering
+    // a full demod re-render and worker churn.
+    float lastNotifiedFrequency_ = std::numeric_limits<float>::quiet_NaN();
+    int   lastNotifiedDeviation_ = -1;
 
     QPixmap* getPixmapTile(size_t tile);
     float* getFFTTile(size_t tile);

@@ -33,10 +33,22 @@ void TunerTransform::work(void *input, void *output, int count, size_t sampleid)
     auto out = static_cast<std::complex<float>*>(output);
     auto temp = std::make_unique<std::complex<float>[]>(count);
 
+    // Snapshot parameters under the short-hold paramMutex_ and drop it
+    // before the heavy NCO+FIR loop. The base class's `mutex` is also held
+    // here (by SampleBuffer::getSamples), but the GUI-thread setters use
+    // paramMutex_ instead, so they aren't blocked by this work() running.
+    float freqLocal;
+    std::vector<float> tapsLocal;
+    {
+        QMutexLocker ml(&paramMutex_);
+        freqLocal = frequency;
+        tapsLocal = taps;
+    }
+
     // Mix down
     nco_crcf mix = nco_crcf_create(LIQUID_NCO);
-    nco_crcf_set_phase(mix, fmodf(frequency * sampleid, Tau));
-    nco_crcf_set_frequency(mix, frequency);
+    nco_crcf_set_phase(mix, fmodf(freqLocal * sampleid, Tau));
+    nco_crcf_set_frequency(mix, freqLocal);
     nco_crcf_mix_block_down(mix,
                             static_cast<std::complex<float>*>(input),
                             temp.get(),
@@ -44,7 +56,7 @@ void TunerTransform::work(void *input, void *output, int count, size_t sampleid)
     nco_crcf_destroy(mix);
 
     // Filter
-    firfilt_crcf filter = firfilt_crcf_create(taps.data(), taps.size());
+    firfilt_crcf filter = firfilt_crcf_create(tapsLocal.data(), tapsLocal.size());
     for (int i = 0; i < count; i++)
     {
         firfilt_crcf_push(filter, temp[i]);
@@ -55,32 +67,30 @@ void TunerTransform::work(void *input, void *output, int count, size_t sampleid)
 
 void TunerTransform::setFrequency(float frequency)
 {
-    // Serialize with work() — a worker thread may be reading frequency now.
-    QMutexLocker ml(&mutex);
+    QMutexLocker ml(&paramMutex_);
     this->frequency = frequency;
 }
 
 void TunerTransform::setTaps(std::vector<float> taps)
 {
-    // Reassigning the vector reallocates storage; concurrent readers in
-    // work() (via firfilt_crcf_create) would otherwise read freed memory.
-    QMutexLocker ml(&mutex);
+    QMutexLocker ml(&paramMutex_);
     this->taps = std::move(taps);
 }
 
 float TunerTransform::relativeBandwidth() {
+    QMutexLocker ml(&paramMutex_);
     return bandwidth;
 }
 
 void TunerTransform::setRelativeBandwith(float bandwidth)
 {
-    QMutexLocker ml(&mutex);
+    QMutexLocker ml(&paramMutex_);
     this->bandwidth = bandwidth;
 }
 
 size_t TunerTransform::historySize()
 {
-    QMutexLocker ml(&mutex);
+    QMutexLocker ml(&paramMutex_);
     return std::max(static_cast<size_t>(256), taps.size());
 }
 

@@ -68,6 +68,9 @@ private slots:
     void schedulePendingTiles();
     // Background min/max for float plots is ready
     void onMinMaxReady();
+    // Async float-trace renderer finished — swap in the new image and, if the
+    // view has moved on while it ran, kick off another render for the latest key.
+    void onFloatImageReady();
 
 private:
     // In-process tile keys
@@ -89,8 +92,18 @@ private:
     // Last-known global min/max
     double globalMin = 0.0;
     double globalMax = 1.0;
-    // Bumps whenever globalMin/Max change; included in tile cache keys so old
-    // tiles (rendered with a stale scale) become unreachable and get replaced.
+    // Bumped only by invalidateEvent (real upstream data changes — tuner
+    // moved, FM cutoff changed, etc.). Used as the cache-invalidation signal
+    // for both the complex-tile pixmap cache and the float-trace image
+    // cache. Splitting this from any min/max-driven bump means a tiny
+    // scale wobble (3% range shift after a tuner move) doesn't churn the
+    // entire cached render — the user sees the rendered trace, plus axis
+    // labels that paintFront draws live from globalMin/Max each frame.
+    int dataEpoch = 0;
+    // Counter that's bumped on min/max changes; kept for the trace cache
+    // logic that wants to know "did min/max move at all". Currently only
+    // used to drive the LatencyLog message; could be repurposed if the
+    // axis layer ever wants to debounce its own redraw on it.
     int minMaxEpoch = 0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
@@ -104,10 +117,40 @@ private:
     // paintFront whenever the visible range overlaps with the marker.
     std::vector<size_t> periodMarkers_;
 
+    // Async float-trace render state. Single-image pipeline: paintMid blits
+    // the last completed image (possibly stale) and requests a new render
+    // whenever the key shifts. Workers run on the global thread pool; we
+    // keep at most one in flight per plot, and as soon as it finishes we
+    // launch the next one if the latest key has moved on.
+    struct FloatKey {
+        size_t   start = 0;
+        size_t   len   = 0;
+        int      w     = 0;
+        int      h     = 0;
+        double   yScale = 1.0;
+        int      epoch = 0;   // mirrors TracePlot::dataEpoch
+        bool operator==(const FloatKey &o) const {
+            return start==o.start && len==o.len && w==o.w && h==o.h
+                && yScale==o.yScale && epoch==o.epoch;
+        }
+        bool operator!=(const FloatKey &o) const { return !(*this == o); }
+    };
+    QImage                       floatImage_;
+    FloatKey                     floatImageKey_{};
+    bool                         floatHasImage_ = false;
+    FloatKey                     floatPendingKey_{};
+    bool                         floatPendingValid_ = false;
+    FloatKey                     floatRunningKey_{};
+    bool                         floatRunning_ = false;
+    QFutureWatcher<QImage>      *floatWatcher_ = nullptr;
+
     // Kick off a background global min/max compute if the view has changed.
     void scheduleMinMaxIfNeeded(range_t<size_t> sampleRange);
     // Update globalMin/Max and bump the epoch on change; skips non-finite inputs.
     void applyMinMax(QPair<double,double> result);
+    // Launch a background render for the given key. Caller must guarantee
+    // floatRunning_ is false.
+    void startFloatRender(const FloatKey &k, double mid, double invRange);
     // Request the pixmap for a given tile (width in pixels drives sample count)
     QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
     void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);

@@ -124,6 +124,22 @@ void MainWindow::openFile(QString fileName)
         }
     }
 
+    // gqrx capture filename: gqrx_<YYYYMMDD>_<HHMMSS>_<centerfreqHz>_<sampleRateHz>_fc.raw
+    // Example: gqrx_20260429_031912_251580000_10000000_fc.raw
+    // Both fields are integer Hz, so a clean regex+toDouble round-trip works.
+    QRegExp gqrxRx("gqrx_\\d{8}_\\d{6}_(\\d+)_(\\d+)_fc\\.raw");
+    if (gqrxRx.exactMatch(basename)) {
+        bool ok = false;
+        double centerHz = gqrxRx.cap(1).toDouble(&ok);
+        if (ok && centerHz > 0.0) {
+            input->setCenterFrequency(centerHz);
+        }
+        double rateHz = gqrxRx.cap(2).toDouble(&ok);
+        if (ok && rateHz > 0.0) {
+            setSampleRate(rateHz);
+        }
+    }
+
     try
     {
         input->openFile(fileName.toUtf8().constData());
@@ -154,9 +170,16 @@ void MainWindow::setSampleRate(QString rate)
     input->setSampleRate(sampleRate);
     plots->setSampleRate(sampleRate);
 
-    // Save the sample rate in settings as we're likely to be opening the same file across multiple runs
-    QSettings settings;
-    settings.setValue("SampleRate", sampleRate);
+    // Save the sample rate in settings as we're likely to be opening the same
+    // file across multiple runs. Skip the save if the value is bogus (≤ 0):
+    // a transient zero (cleared text field, in-flight typing) used to poison
+    // QSettings and turn FrequencyDemod's Hz scaling into "multiply by 0",
+    // which made the FM plot a flat line on the next launch with no obvious
+    // cause.
+    if (sampleRate > 0.0) {
+        QSettings settings;
+        settings.setValue("SampleRate", sampleRate);
+    }
 }
 
 void MainWindow::setSampleRate(double rate)

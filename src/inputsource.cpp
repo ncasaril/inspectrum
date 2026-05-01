@@ -642,6 +642,16 @@ void InputSource::setSampleRate(double rate)
     invalidate();
 }
 
+void InputSource::setCenterFrequency(double freq)
+{
+    // `frequency` lives on SampleSource<T> and is the value the spectrogram's
+    // frequency axis labels reference (and what derived plots read via
+    // getFrequency()). Auto-init paths (gqrx filenames, etc.) call this so
+    // the axis reads true Hz instead of "0 Hz" baseband.
+    frequency = freq;
+    invalidate();
+}
+
 double InputSource::rate()
 {
     return sampleRate;

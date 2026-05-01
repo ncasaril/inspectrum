@@ -242,9 +242,16 @@ void SpectrogramControls::setDefaults()
     annoLabelCheckBox->setCheckState(Qt::Checked);
     annoColorCheckBox->setCheckState(Qt::Checked);
 
-    // Try to set the sample rate from the last-used value
+    // Try to set the sample rate from the last-used value. Sanity-check the
+    // loaded value: a missing/zero setting means "no useful rate was ever
+    // saved", in which case fall back to 8 MHz rather than starting at 0
+    // (FrequencyDemod skips its Hz scaling at rate=0, but downstream UI
+    // — time scale, hover, period analyser — are all degraded with rate=0,
+    // and an obvious sane default lets the user see something instead of a
+    // flat trace).
     QSettings settings;
     int savedSampleRate = settings.value("SampleRate", 8000000).toInt();
+    if (savedSampleRate <= 0) savedSampleRate = 8000000;
     sampleRate->setText(QString::number(savedSampleRate));
     fftSizeSlider->setValue(settings.value("FFTSize", 9).toInt());
     powerMaxSlider->setValue(settings.value("PowerMax", 0).toInt());
