@@ -45,6 +45,7 @@ private:
     std::unique_ptr<SampleAdapter> sampleAdapter;
     std::string _fmt;
     bool _realSignal = false;
+    QString _filePath;
 
     QJsonObject readMetaData(const QString &filename);
     // Populate sampleAdapter / sampleRate / sampleCount / frequency /
@@ -70,4 +71,5 @@ public:
     float relativeBandwidth() {
         return 1;
     }
+    QString filePath() const { return _filePath; }
 };

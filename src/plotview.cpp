@@ -21,12 +21,21 @@
 #include "frequencydemod.h"
 #include "util.h"
 #include <QPixmapCache>
+#include <climits>
+#include <cmath>
 #include <iostream>
 #include <fstream>
+#include <type_traits>
 #include <QtGlobal>
 #include <QApplication>
 #include <QClipboard>
+#include <QDateTime>
 #include <QDebug>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMessageBox>
 #include <QWheelEvent>
 #include <QFileDialog>
 #include <QGridLayout>
@@ -783,6 +792,19 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
     }
 }
 
+// Tightest integer power of two ≤ 1/relBw, clamped to ≥ 1. Decimation by this
+// keeps the tuner pass-band inside the new Nyquist (the TunerTransform's FIR
+// already constrains energy to ±relBw·Fs/2 around DC).
+static int defaultPow2DecimFor(float relBw)
+{
+    if (!(relBw > 0.0f) || relBw >= 1.0f)
+        return 1;
+    int decim = 1;
+    while ((decim * 2) <= (int)std::floor(1.0f / relBw))
+        decim *= 2;
+    return decim;
+}
+
 template<typename SOURCETYPE>
 void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
 {
@@ -791,10 +813,18 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
         return;
     }
 
+    const bool sigmfSupported = std::is_same<SOURCETYPE, std::complex<float>>::value;
+    const QString rawFilter = QString::fromUtf8(getFileNameFilter<SOURCETYPE>());
+    const QString sigmfFilter = QStringLiteral("SigMF tuned IQ (*.sigmf-meta)");
+
     QFileDialog dialog(this);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setFileMode(QFileDialog::AnyFile);
-    dialog.setNameFilter(getFileNameFilter<SOURCETYPE>());
+    QStringList filters;
+    filters << rawFilter;
+    if (sigmfSupported)
+        filters << sigmfFilter;
+    dialog.setNameFilters(filters);
     dialog.setOption(QFileDialog::DontUseNativeDialog, true);
 
     QGroupBox groupBox("Selection To Export", &dialog);
@@ -824,7 +854,8 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
     QGroupBox groupBox2("Decimation");
     QSpinBox decimation(&groupBox2);
     decimation.setMinimum(1);
-    decimation.setValue(1 / sampleSrc->relativeBandwidth());
+    const int rawDefaultDecim = std::max(1, (int)(1.0f / sampleSrc->relativeBandwidth()));
+    decimation.setValue(rawDefaultDecim);
 
     QVBoxLayout vbox2;
     vbox2.addWidget(&decimation);
@@ -832,43 +863,249 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
     groupBox2.setLayout(&vbox2);
     l->addWidget(&groupBox2, 4, 2);
 
-    if (dialog.exec()) {
-        QStringList fileNames = dialog.selectedFiles();
+    // When the user switches to SigMF, default the decim to the tightest
+    // power-of-two so the new sample rate hugs the tuner pass-band. We don't
+    // *force* power-of-two — the user can override if they want to keep the
+    // existing rate or pick a non-2 factor.
+    if (sigmfSupported) {
+        connect(&dialog, &QFileDialog::filterSelected, this, [&](const QString &f) {
+            if (f == sigmfFilter)
+                decimation.setValue(defaultPow2DecimFor(sampleSrc->relativeBandwidth()));
+            else
+                decimation.setValue(rawDefaultDecim);
+        });
+    }
 
-        size_t start, end;
-        if (cursorSelection.isChecked()) {
-            start = selectedSamples.minimum;
-            end = start + selectedSamples.length();
-        } else if(currentView.isChecked()) {
-            start = viewRange.minimum;
-            end = start + viewRange.length();
-        } else {
-            start = 0;
-            end = sampleSrc->count();
+    if (!dialog.exec())
+        return;
+
+    QStringList fileNames = dialog.selectedFiles();
+    if (fileNames.isEmpty())
+        return;
+
+    size_t start, end;
+    if (cursorSelection.isChecked()) {
+        start = selectedSamples.minimum;
+        end = start + selectedSamples.length();
+    } else if (currentView.isChecked()) {
+        start = viewRange.minimum;
+        end = start + viewRange.length();
+    } else {
+        start = 0;
+        end = sampleSrc->count();
+    }
+
+    // Trust either the filter dropdown or an explicit .sigmf-* extension in
+    // the typed name — typing the extension is a discoverable shortcut and
+    // would otherwise silently fall back to a raw-write of an oddly-named file.
+    const bool typedSigmfName =
+        fileNames[0].endsWith(".sigmf-meta", Qt::CaseInsensitive) ||
+        fileNames[0].endsWith(".sigmf-data", Qt::CaseInsensitive);
+    const bool wantSigmf = sigmfSupported &&
+        (dialog.selectedNameFilter() == sigmfFilter || typedSigmfName);
+    if (wantSigmf) {
+        // Reachable only when SOURCETYPE == complex<float>; the cast below
+        // succeeds because sigmfSupported was the gate for offering SigMF.
+        auto cplxSrc = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(src);
+        if (!cplxSrc)
+            return;
+        QString metaPath = fileNames[0];
+        if (!metaPath.endsWith(".sigmf-meta", Qt::CaseInsensitive)) {
+            // Strip a .sigmf-data sibling extension if present, then append.
+            if (metaPath.endsWith(".sigmf-data", Qt::CaseInsensitive))
+                metaPath.chop(QStringLiteral(".sigmf-data").size());
+            metaPath += QStringLiteral(".sigmf-meta");
         }
+        writeSigmf(cplxSrc, metaPath, start, end, std::max(1, decimation.value()));
+        return;
+    }
 
-        std::ofstream os (fileNames[0].toStdString(), std::ios::binary);
+    std::ofstream os(fileNames[0].toStdString(), std::ios::binary);
 
-        size_t index;
-        // viewRange.length() is used as some less arbitrary step value
-        size_t step = viewRange.length();
+    size_t index;
+    // viewRange.length() is used as some less arbitrary step value
+    size_t step = viewRange.length();
 
-        QProgressDialog progress("Exporting samples...", "Cancel", start, end, this);
-        progress.setWindowModality(Qt::WindowModal);
-        for (index = start; index < end; index += step) {
-            progress.setValue(index);
-            if (progress.wasCanceled())
-                break;
+    QProgressDialog progress("Exporting samples...", "Cancel", start, end, this);
+    progress.setWindowModality(Qt::WindowModal);
+    for (index = start; index < end; index += step) {
+        progress.setValue(index);
+        if (progress.wasCanceled())
+            break;
 
-            size_t length = std::min(step, end - index);
-            auto samples = sampleSrc->getSamples(index, length);
-            if (samples != nullptr) {
-                for (auto i = 0; i < length; i += decimation.value()) {
-                    os.write((const char*)&samples[i], sizeof(SOURCETYPE));
-                }
+        size_t length = std::min(step, end - index);
+        auto samples = sampleSrc->getSamples(index, length);
+        if (samples != nullptr) {
+            for (auto i = 0; i < length; i += decimation.value()) {
+                os.write((const char*)&samples[i], sizeof(SOURCETYPE));
             }
         }
     }
+}
+
+// Encode a QColor as the SigMF presentation-color string "#RRGGBBAA". Inverse
+// of the read path in InputSource which rotates Qt's "#AARRGGBB" form.
+static QString sigmfColorString(const QColor &c)
+{
+    return QStringLiteral("#%1%2%3%4")
+        .arg(c.red(),   2, 16, QChar('0'))
+        .arg(c.green(), 2, 16, QChar('0'))
+        .arg(c.blue(),  2, 16, QChar('0'))
+        .arg(c.alpha(), 2, 16, QChar('0'))
+        .toUpper();
+}
+
+bool PlotView::writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src,
+                          const QString &metaPath,
+                          size_t start, size_t end, int decim)
+{
+    if (decim < 1) decim = 1;
+    if (end <= start) {
+        QMessageBox::warning(this, "SigMF export", "Empty selection — nothing to write.");
+        return false;
+    }
+
+    QString dataPath = metaPath;
+    dataPath.chop(QStringLiteral(".sigmf-meta").size());
+    dataPath += QStringLiteral(".sigmf-data");
+
+    std::ofstream os(dataPath.toStdString(), std::ios::binary);
+    if (!os) {
+        QMessageBox::warning(this, "SigMF export",
+                             QStringLiteral("Could not open %1 for writing.").arg(dataPath));
+        return false;
+    }
+
+    // Read in the same chunk size as the raw exporter so progress and memory
+    // behaviour match. With decim>1 we still read a full chunk and write
+    // every Nth sample — keeps the loop simple and lets the upstream FIR see
+    // contiguous input.
+    const size_t step = std::max<size_t>(viewRange.length(), 65536);
+    QProgressDialog progress("Exporting SigMF samples...", "Cancel",
+                             (int)std::min<size_t>(start, INT_MAX),
+                             (int)std::min<size_t>(end,   INT_MAX), this);
+    progress.setWindowModality(Qt::WindowModal);
+
+    size_t writtenSamples = 0;
+    for (size_t index = start; index < end; index += step) {
+        if (index <= (size_t)INT_MAX)
+            progress.setValue((int)index);
+        if (progress.wasCanceled()) {
+            os.close();
+            QFile::remove(dataPath);
+            return false;
+        }
+        size_t length = std::min(step, end - index);
+        auto samples = src->getSamples(index, length);
+        if (!samples) continue;
+        // Pick samples whose absolute offset from `start` is a multiple of
+        // decim — keeps the every-Nth pattern aligned across chunk boundaries
+        // without explicit phase carry.
+        const size_t relStart = index - start;
+        const size_t chunkPhase = (decim - (relStart % decim)) % decim;
+        for (size_t i = chunkPhase; i < length; i += decim) {
+            os.write((const char*)&samples[i], sizeof(std::complex<float>));
+            ++writtenSamples;
+        }
+    }
+    os.close();
+
+    // Provenance: pull the source filename and capture frequency from the
+    // InputSource at the head of the chain. mainSampleSource is always an
+    // InputSource (set in the constructor), so the cast is sound.
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    const double oldRate = sampleRate;
+    const double tunerOffset = spectrogramPlot ? spectrogramPlot->tunerOffsetHz() : 0.0;
+    const double tunerBw    = spectrogramPlot ? spectrogramPlot->tunerBandwidthHz() : oldRate;
+    const double oldCenter  = inputSrc ? inputSrc->getFrequency() : 0.0;
+    const double newRate    = (decim > 0) ? oldRate / (double)decim : oldRate;
+    const double newCenter  = oldCenter + tunerOffset;
+
+    const QString nowIso = QDateTime::currentDateTimeUtc()
+                               .toString(QStringLiteral("yyyy-MM-ddTHH:mm:ss.zzzZ"));
+    const QString sourceFile = inputSrc ? inputSrc->filePath() : QString();
+
+    QJsonObject global;
+    global.insert("core:datatype", QStringLiteral("cf32_le"));
+    global.insert("core:sample_rate", newRate);
+    global.insert("core:version", QStringLiteral("1.0.0"));
+    global.insert("core:datetime", nowIso);
+    global.insert("core:description",
+                  QStringLiteral("Tuned IQ export from %1")
+                      .arg(QFileInfo(sourceFile).fileName()));
+    global.insert("inspectrum:source_file", sourceFile);
+    global.insert("inspectrum:source_sample_rate", oldRate);
+    global.insert("inspectrum:source_center_frequency", oldCenter);
+    global.insert("inspectrum:tuner_offset_hz", tunerOffset);
+    global.insert("inspectrum:tuner_bandwidth_hz", tunerBw);
+    global.insert("inspectrum:export_start_sample", (qint64)start);
+    global.insert("inspectrum:export_end_sample", (qint64)end);
+    global.insert("inspectrum:decimation", decim);
+
+    QJsonObject capture;
+    capture.insert("core:sample_start", 0);
+    capture.insert("core:frequency", newCenter);
+    capture.insert("core:datetime", nowIso);
+    QJsonArray captures;
+    captures.append(capture);
+
+    // Annotation translation: keep entries that overlap both the export time
+    // window AND the new pass-band. Frequencies are absolute Hz in SigMF, so
+    // they don't need rewriting; sample indices do (relative to the new
+    // start, scaled by decim).
+    const double passLo = newCenter - newRate * 0.5;
+    const double passHi = newCenter + newRate * 0.5;
+    QJsonArray annotations;
+    if (inputSrc) {
+        for (const Annotation &a : inputSrc->annotationList) {
+            if (a.sampleRange.maximum < start || a.sampleRange.minimum >= end)
+                continue;
+            if (a.frequencyRange.maximum < passLo || a.frequencyRange.minimum > passHi)
+                continue;
+
+            const size_t clipStart = std::max<size_t>(a.sampleRange.minimum, start);
+            const size_t clipEnd   = std::min<size_t>(a.sampleRange.maximum, end - 1);
+            // ceil for start / floor for end so the new range strictly covers
+            // every original sample of the annotation that survived the clip.
+            const size_t newStart = (clipStart - start + (size_t)decim - 1) / (size_t)decim;
+            const size_t newEnd   = (clipEnd   - start) / (size_t)decim;
+            const size_t newCount = (newEnd >= newStart) ? (newEnd - newStart + 1) : 1;
+
+            QJsonObject ann;
+            ann.insert("core:sample_start", (qint64)newStart);
+            ann.insert("core:sample_count", (qint64)newCount);
+            ann.insert("core:freq_lower_edge", a.frequencyRange.minimum);
+            ann.insert("core:freq_upper_edge", a.frequencyRange.maximum);
+            if (!a.label.isEmpty())
+                ann.insert("core:label", a.label);
+            if (!a.comment.isEmpty())
+                ann.insert("core:comment", a.comment);
+            if (a.boxColor.isValid() && a.boxColor != QColor("white"))
+                ann.insert("presentation:color", sigmfColorString(a.boxColor));
+            annotations.append(ann);
+        }
+    }
+
+    QJsonObject root;
+    root.insert("global", global);
+    root.insert("captures", captures);
+    root.insert("annotations", annotations);
+
+    QFile metaFile(metaPath);
+    if (!metaFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QMessageBox::warning(this, "SigMF export",
+                             QStringLiteral("Wrote %1 but could not open %2 for writing.")
+                                 .arg(dataPath).arg(metaPath));
+        return false;
+    }
+    metaFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    metaFile.close();
+
+    qDebug() << "SigMF export:" << writtenSamples << "samples to" << dataPath
+             << "metadata to" << metaPath
+             << "newRate=" << newRate << "newCenter=" << newCenter
+             << "decim=" << decim << "annotations=" << annotations.size();
+    return true;
 }
 
 void PlotView::invalidateEvent()

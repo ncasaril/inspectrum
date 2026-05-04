@@ -509,6 +509,7 @@ void InputSource::openIqTar(const uchar *data, qint64 size)
 void InputSource::openFile(const char *filename)
 {
     QFileInfo fileInfo(filename);
+    _filePath = fileInfo.absoluteFilePath();
     std::string suffix = std::string(fileInfo.suffix().toLower().toUtf8().constData());
     if (_fmt != "") { suffix = _fmt; } // allow fmt override
 

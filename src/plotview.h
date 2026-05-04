@@ -148,6 +148,14 @@ private:
     void extractSymbols(std::shared_ptr<AbstractSampleSource> src, bool toClipboard);
     void exportSamples(std::shared_ptr<AbstractSampleSource> src);
     template<typename SOURCETYPE> void exportSamples(std::shared_ptr<AbstractSampleSource> src);
+    // Writes a SigMF pair (.sigmf-meta + .sigmf-data) of the tuned IQ over
+    // [start..end) with integer decimation. metaPath must end in .sigmf-meta.
+    // Returns true on success. Annotations on the input source that intersect
+    // both the time window and the resulting passband are translated and
+    // included; their absolute Hz frequencies are preserved.
+    bool writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src,
+                    const QString &metaPath,
+                    size_t start, size_t end, int decim);
     int plotsHeight();
     size_t samplesPerColumn();
     void updateViewRange(bool reCenter);

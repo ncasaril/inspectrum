@@ -92,6 +92,12 @@ public:
     std::shared_ptr<SampleSource<std::complex<float>>> input() { return inputSource; };
     void setSampleRate(double sampleRate);
     bool tunerEnabled();
+    // Tuner offset (Hz) from the file's centre frequency: positive = shifted
+    // up, negative = down. Matches the convention in getTunerPhaseInc().
+    double tunerOffsetHz();
+    // Tuner pass-band width (Hz). The TunerTransform's FIR keeps energy to
+    // roughly within ±half of this around the new DC.
+    double tunerBandwidthHz();
     // Move the tuner so its centre frequency matches the given y-coordinate
     // in plot pixels (top of plot = 0, bottom = height()). Used by the right-
     // click "Add derived plot" menu so the new plot tunes to where the user

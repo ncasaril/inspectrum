@@ -877,6 +877,18 @@ bool SpectrogramPlot::tunerEnabled()
     return (tunerTransform->subscriberCount() > 0);
 }
 
+double SpectrogramPlot::tunerOffsetHz()
+{
+    if (height() <= 0) return 0.0;
+    return (0.5 - tuner.centre() / (double)height()) * sampleRate;
+}
+
+double SpectrogramPlot::tunerBandwidthHz()
+{
+    if (height() <= 0) return 0.0;
+    return tuner.deviation() * 2.0 / (double)height() * sampleRate;
+}
+
 void SpectrogramPlot::setTunerCentreY(int y)
 {
     // Clamp into the plot so the cursors stay visible. The tuner uses
