@@ -76,12 +76,18 @@ signals:
     // Reassignment splat method (Bilinear | Nearest). Index matches
     // SplatMethod enum.
     void reassignmentSplatChanged(int sm);
+    // User clicked "Save annotations". MainWindow handles the actual write.
+    void saveAnnotationsRequested();
 
 public slots:
     void timeSelectionChanged(float time);
     void zoomIn();
     void zoomOut();
     void enableAnnotations(bool enabled);
+    // Reflect the annotation dirty state — enables / disables the save
+    // button and tweaks its label so the user can see when there's pending
+    // work without watching the title bar.
+    void setAnnotationsDirty(bool dirty);
     void applyAutoLpf(double cutoffHz, int predemodM, int postN);
     // Show the auto-detected period (in seconds) of the visible FM trace.
     // periodSeconds <= 0 clears the label (no signal / not enough data).
@@ -161,4 +167,7 @@ public:
     QSpinBox   *fmPredemodDecimSpinBox;
     // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
     QPushButton *fmAutoLpfButton;
+    // Save annotations to a .sigmf-meta sidecar. Shown disabled when the
+    // annotation list hasn't been mutated since the last load/save.
+    QPushButton *saveAnnotationsButton;
 };

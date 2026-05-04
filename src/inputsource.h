@@ -21,7 +21,9 @@
 #pragma once
 
 #include <complex>
+#include <functional>
 #include <QFile>
+#include <QJsonObject>
 #include "samplesource.h"
 
 class SampleAdapter {
@@ -46,6 +48,18 @@ private:
     std::string _fmt;
     bool _realSignal = false;
     QString _filePath;
+    // SigMF datatype string ("cf32_le", "ci16_le", ...) inferred from the
+    // sample adapter that openFile picked. Used when synthesising a sidecar
+    // .sigmf-meta for a non-SigMF input.
+    QString _datatype;
+    // Original parsed meta JSON when the input was opened from a .sigmf-*
+    // pair. Empty for raw inputs. saveAnnotations replaces only the
+    // "annotations" array so unrelated keys are round-tripped.
+    QJsonObject _originalSigmfRoot;
+    bool _wasSigmfInput = false;
+    bool _annotationsDirty = false;
+    using AnnotationCallback = std::function<void()>;
+    std::vector<AnnotationCallback> _annotCbs;
 
     QJsonObject readMetaData(const QString &filename);
     // Populate sampleAdapter / sampleRate / sampleCount / frequency /
@@ -72,4 +86,20 @@ public:
         return 1;
     }
     QString filePath() const { return _filePath; }
+
+    // Mutate annotations through these so the dirty flag and change callback
+    // fire consistently. Direct vector access still works for the read path.
+    void addAnnotation(const Annotation &a);
+    bool updateAnnotation(int index, const Annotation &a);
+    bool removeAnnotation(int index);
+    bool annotationsDirty() const { return _annotationsDirty; }
+    // Returns true iff the file was opened from a .sigmf-* pair (i.e. there
+    // is an existing sidecar to round-trip). Saving for a non-SigMF input
+    // synthesises a fresh meta with core:dataset pointing back to the file.
+    bool wasSigmfInput() const { return _wasSigmfInput; }
+    // Persists annotations to a .sigmf-meta beside the data file. Returns
+    // true on success; on failure populates *errorOut if non-null.
+    bool saveAnnotations(QString *errorOut = nullptr);
+    void addAnnotationCallback(AnnotationCallback cb) { _annotCbs.push_back(std::move(cb)); }
+    QString sigmfDatatype() const { return _datatype; }
 };

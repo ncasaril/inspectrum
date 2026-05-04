@@ -34,13 +34,15 @@ public:
     range_t<size_t> sampleRange;
     range_t<double> frequencyRange;
     QString label;
+    QString description;
     QString comment;
     QColor boxColor;
 
+    Annotation() = default;
     Annotation(range_t<size_t> sampleRange, range_t<double>frequencyRange, QString label,
-               QString comment, QColor boxColor)
+               QString description, QString comment, QColor boxColor)
       : sampleRange(sampleRange), frequencyRange(frequencyRange), label(label),
-        comment(comment), boxColor(boxColor) {}
+        description(description), comment(comment), boxColor(boxColor) {}
 };
 
 template<typename T>

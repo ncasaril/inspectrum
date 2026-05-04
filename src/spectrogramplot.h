@@ -109,6 +109,13 @@ public:
     bool isAnnotationsEnabled();
     void enableAnnoColors(bool enabled);
     QString *mouseAnnotationComment(const QMouseEvent *event);
+    // Returns the index in inputSource->annotationList of the annotation under
+    // (x, y) in viewport coords, or -1. Walks the visibleAnnotationLocations
+    // table populated during the most recent paint.
+    int annotationIndexAt(int x, int y) const;
+    // Convert a y in plot-local coords (0..height()) to absolute Hz, using the
+    // input source's centre frequency.
+    double freqAtPlotY(int y) const;
 
 public slots:
     void setFFTSize(int size);

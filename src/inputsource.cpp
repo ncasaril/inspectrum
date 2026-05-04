@@ -350,6 +350,7 @@ QJsonObject InputSource::readMetaData(const QString &filename)
     } else {
         throw std::runtime_error("SigMF meta data specifies unsupported datatype");
     }
+    _datatype = datatype;
 
     if (global.contains("core:sample_rate") && global["core:sample_rate"].isDouble()) {
         setSampleRate(global["core:sample_rate"].toDouble());
@@ -400,10 +401,7 @@ QJsonObject InputSource::readMetaData(const QString &filename)
                 auto frequencyRange = range_t<double>{freq_lower_edge, freq_upper_edge};
 
                 auto label = sigmf_annotation["core:label"].toString();
-                if (label.isEmpty()) {
-                    label = sigmf_annotation["core:description"].toString();
-                }
-
+                auto description = sigmf_annotation["core:description"].toString();
                 auto comment = sigmf_annotation["core:comment"].toString();
 
                 auto sigmf_color = sigmf_annotation["presentation:color"].toString();
@@ -416,7 +414,7 @@ QJsonObject InputSource::readMetaData(const QString &filename)
                     boxColor = sigmf_color;
                 }
 
-                annotationList.emplace_back(sampleRange, frequencyRange, label, comment, boxColor);
+                annotationList.emplace_back(sampleRange, frequencyRange, label, description, comment, boxColor);
             }
         }
     }
@@ -510,6 +508,9 @@ void InputSource::openFile(const char *filename)
 {
     QFileInfo fileInfo(filename);
     _filePath = fileInfo.absoluteFilePath();
+    _wasSigmfInput = false;
+    _originalSigmfRoot = QJsonObject();
+    _annotationsDirty = false;
     std::string suffix = std::string(fileInfo.suffix().toLower().toUtf8().constData());
     if (_fmt != "") { suffix = _fmt; } // allow fmt override
 
@@ -547,44 +548,56 @@ void InputSource::openFile(const char *filename)
 
     if ((suffix == "cfile") || (suffix == "cf32")  || (suffix == "fc32")) {
         sampleAdapter = std::make_unique<ComplexF32SampleAdapter>();
+        _datatype = "cf32_le";
     }
     else if ((suffix == "cf64")  || (suffix == "fc64")) {
         sampleAdapter = std::make_unique<ComplexF64SampleAdapter>();
+        _datatype = "cf64_le";
     }
     else if ((suffix == "cs32") || (suffix == "sc32") || (suffix == "c32")) {
         sampleAdapter = std::make_unique<ComplexS32SampleAdapter>();
+        _datatype = "ci32_le";
     }
     else if ((suffix == "cs16") || (suffix == "sc16") || (suffix == "c16")) {
         sampleAdapter = std::make_unique<ComplexS16SampleAdapter>();
+        _datatype = "ci16_le";
     }
     else if ((suffix == "cs8") || (suffix == "sc8") || (suffix == "c8")) {
         sampleAdapter = std::make_unique<ComplexS8SampleAdapter>();
+        _datatype = "ci8";
     }
     else if ((suffix == "cu8") || (suffix == "uc8")) {
         sampleAdapter = std::make_unique<ComplexU8SampleAdapter>();
+        _datatype = "cu8";
     }
     else if (suffix == "f32") {
         sampleAdapter = std::make_unique<RealF32SampleAdapter>();
         _realSignal = true;
+        _datatype = "rf32_le";
     }
     else if (suffix == "f64") {
         sampleAdapter = std::make_unique<RealF64SampleAdapter>();
         _realSignal = true;
+        _datatype = "rf64_le";
     }
     else if (suffix == "s16") {
         sampleAdapter = std::make_unique<RealS16SampleAdapter>();
         _realSignal = true;
+        _datatype = "ri16_le";
     }
     else if (suffix == "s8") {
         sampleAdapter = std::make_unique<RealS8SampleAdapter>();
         _realSignal = true;
+        _datatype = "ri8";
     }
     else if (suffix == "u8") {
         sampleAdapter = std::make_unique<RealU8SampleAdapter>();
         _realSignal = true;
+        _datatype = "ru8";
     }
     else {
         sampleAdapter = std::make_unique<ComplexF32SampleAdapter>();
+        _datatype = "cf32_le";
     }
 
     QString dataFilename;
@@ -596,6 +609,8 @@ void InputSource::openFile(const char *filename)
         dataFilename = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-data";
         metaFilename = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-meta";
         auto metaData = readMetaData(metaFilename);
+        _wasSigmfInput = true;
+        _originalSigmfRoot = metaData;
         QFile datafile(dataFilename);
         if (!datafile.open(QFile::ReadOnly | QIODevice::Text)) {
             auto global = metaData["global"].toObject();
@@ -680,4 +695,126 @@ std::unique_ptr<std::complex<float>[]> InputSource::getSamples(size_t start, siz
 
 void InputSource::setFormat(std::string fmt){
     _fmt = fmt;
+}
+
+namespace {
+
+// Encode a QColor as the SigMF presentation-color string "#RRGGBBAA". Inverse
+// of the parsing in readMetaData which rotates Qt's "#AARRGGBB" form.
+QString sigmfColor(const QColor &c) {
+    return QStringLiteral("#%1%2%3%4")
+        .arg(c.red(),   2, 16, QChar('0'))
+        .arg(c.green(), 2, 16, QChar('0'))
+        .arg(c.blue(),  2, 16, QChar('0'))
+        .arg(c.alpha(), 2, 16, QChar('0'))
+        .toUpper();
+}
+
+QJsonObject annotationToJson(const Annotation &a) {
+    QJsonObject ann;
+    ann.insert("core:sample_start", (qint64)a.sampleRange.minimum);
+    ann.insert("core:sample_count",
+               (qint64)(a.sampleRange.maximum - a.sampleRange.minimum + 1));
+    ann.insert("core:freq_lower_edge", a.frequencyRange.minimum);
+    ann.insert("core:freq_upper_edge", a.frequencyRange.maximum);
+    if (!a.label.isEmpty())       ann.insert("core:label", a.label);
+    if (!a.description.isEmpty()) ann.insert("core:description", a.description);
+    if (!a.comment.isEmpty())     ann.insert("core:comment", a.comment);
+    if (a.boxColor.isValid() && a.boxColor != QColor("white"))
+        ann.insert("presentation:color", sigmfColor(a.boxColor));
+    return ann;
+}
+
+}  // namespace
+
+void InputSource::addAnnotation(const Annotation &a)
+{
+    annotationList.push_back(a);
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+}
+
+bool InputSource::updateAnnotation(int index, const Annotation &a)
+{
+    if (index < 0 || index >= (int)annotationList.size()) return false;
+    annotationList[index] = a;
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+    return true;
+}
+
+bool InputSource::removeAnnotation(int index)
+{
+    if (index < 0 || index >= (int)annotationList.size()) return false;
+    annotationList.erase(annotationList.begin() + index);
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+    return true;
+}
+
+bool InputSource::saveAnnotations(QString *errorOut)
+{
+    if (_filePath.isEmpty()) {
+        if (errorOut) *errorOut = "No file is open.";
+        return false;
+    }
+
+    QFileInfo fileInfo(_filePath);
+    QString metaPath;
+    if (_wasSigmfInput) {
+        metaPath = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-meta";
+    } else {
+        // Sidecar next to the original data file. Keep the full original
+        // filename in the meta name so a follow-up open of either still
+        // resolves the right pair via core:dataset.
+        metaPath = _filePath + ".sigmf-meta";
+    }
+
+    QJsonArray annotations;
+    for (const auto &a : annotationList)
+        annotations.append(annotationToJson(a));
+
+    QJsonObject root;
+    if (_wasSigmfInput && !_originalSigmfRoot.isEmpty()) {
+        // Round-trip every other key the original meta had; only annotations
+        // gets replaced. This avoids losing custom captures, hardware tags,
+        // extension keys, etc.
+        root = _originalSigmfRoot;
+        root.insert("annotations", annotations);
+    } else {
+        QJsonObject global;
+        global.insert("core:datatype",
+                      _datatype.isEmpty() ? QStringLiteral("cf32_le") : _datatype);
+        if (sampleRate > 0.0)
+            global.insert("core:sample_rate", sampleRate);
+        global.insert("core:version", QStringLiteral("1.0.0"));
+        global.insert("core:dataset", fileInfo.fileName());
+        global.insert("core:description",
+                      QStringLiteral("Sidecar created by inspectrum"));
+        QJsonObject capture;
+        capture.insert("core:sample_start", 0);
+        capture.insert("core:frequency", frequency);
+        QJsonArray captures;
+        captures.append(capture);
+        root.insert("global", global);
+        root.insert("captures", captures);
+        root.insert("annotations", annotations);
+    }
+
+    QFile out(metaPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        if (errorOut) *errorOut = "Could not open " + metaPath + " for writing: " + out.errorString();
+        return false;
+    }
+    out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    out.close();
+
+    // After a successful save, the on-disk root *is* the new authority — so
+    // a subsequent save round-trips against the version we just wrote, not
+    // the older parsed copy. Marks us as a SigMF-paired input from now on.
+    _originalSigmfRoot = root;
+    _wasSigmfInput = true;
+    _annotationsDirty = false;
+    for (auto &cb : _annotCbs) if (cb) cb();
+    return true;
 }

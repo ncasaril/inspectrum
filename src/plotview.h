@@ -21,6 +21,8 @@
 
 #include <QGraphicsView>
 #include <QPaintEvent>
+#include <QPoint>
+#include <QRubberBand>
 
 #include <QTimer>
 
@@ -178,4 +180,25 @@ private:
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
     int    fmDecim = 1;
     int    fmPredemodDecim = 1;
+    // Shift+left-drag annotation rubber-banding on the spectrogram. The
+    // rectangle is in viewport coords; on release we map x→sample range and
+    // y→absolute Hz range, then open AnnotationDialog.
+    QRubberBand *annotRubber = nullptr;
+    bool         annotDragging = false;
+    QPoint       annotDragOrigin;
+    bool isOverSpectrogram(int viewportY) const;
+    bool startAnnotationDrag(QMouseEvent *event);
+    void updateAnnotationDrag(QMouseEvent *event);
+    void finishAnnotationDrag(QMouseEvent *event);
+    // Compose an annotation from a viewport rectangle and open the editor.
+    // On accept, appends to the input source.
+    void promptNewAnnotation(QRect viewportRect);
+    // Right-click "Add annotation here" / "Edit annotation" / "Delete
+    // annotation" wiring lives in contextMenuEvent; these helpers are the
+    // shared logic.
+    void promptEditAnnotation(int index);
+    void deleteAnnotation(int index);
+    // Connected to InputSource::setAnnotationCallback in the constructor —
+    // handles repaint, dirty title bar, dock save-button enable.
+    void onAnnotationsChanged();
 };

@@ -28,7 +28,8 @@
 
 MainWindow::MainWindow()
 {
-    setWindowTitle(tr("inspectrum - jacobagilbert edition"));
+    baseTitle = tr("inspectrum - jacobagilbert edition");
+    setWindowTitle(baseTitle);
 
     QPixmapCache::setCacheLimit(40960);
 
@@ -38,9 +39,16 @@ MainWindow::MainWindow()
 
     input = new InputSource();
     input->subscribe(this);
+    // Mirror annotation changes into the title bar dirty marker and dock
+    // button state. Wired before PlotView's own callback so the first add
+    // doesn't slip through.
+    input->addAnnotationCallback([this]() { onAnnotationsChanged(); });
 
     plots = new PlotView(input);
     setCentralWidget(plots);
+
+    connect(dock, &SpectrogramControls::saveAnnotationsRequested,
+            this, &MainWindow::saveAnnotations);
 
     // Connect dock inputs
     connect(dock, &SpectrogramControls::openFile, this, &MainWindow::openFile);
@@ -109,7 +117,8 @@ MainWindow::MainWindow()
 void MainWindow::openFile(QString fileName)
 {
     QString title="%1 jacobagilbert edition: %2";
-    this->setWindowTitle(title.arg(QApplication::applicationName(),fileName.section('/',-1,-1)));
+    baseTitle = title.arg(QApplication::applicationName(), fileName.section('/',-1,-1));
+    refreshWindowTitle();
 
     // Try to parse osmocom_fft filenames and extract the sample rate and center frequency.
     // Example file name: "name-f2.411200e+09-s5.000000e+06-t20160807180210.cfile"
@@ -199,4 +208,53 @@ void MainWindow::setSampleRate(double rate)
 void MainWindow::setFormat(QString fmt)
 {
     input->setFormat(fmt.toUtf8().constData());
+}
+
+void MainWindow::onAnnotationsChanged()
+{
+    refreshWindowTitle();
+    if (dock)
+        dock->setAnnotationsDirty(input->annotationsDirty());
+}
+
+void MainWindow::refreshWindowTitle()
+{
+    if (input && input->annotationsDirty())
+        setWindowTitle(baseTitle + QStringLiteral(" *"));
+    else
+        setWindowTitle(baseTitle);
+}
+
+void MainWindow::saveAnnotations()
+{
+    QString err;
+    if (!input->saveAnnotations(&err)) {
+        QMessageBox::warning(this, tr("Save annotations"),
+                             tr("Could not save: %1").arg(err));
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (input && input->annotationsDirty()) {
+        auto choice = QMessageBox::question(
+            this, tr("Unsaved annotations"),
+            tr("Annotations have been edited but not saved. Save before closing?"),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (choice == QMessageBox::Cancel) {
+            event->ignore();
+            return;
+        }
+        if (choice == QMessageBox::Save) {
+            QString err;
+            if (!input->saveAnnotations(&err)) {
+                QMessageBox::warning(this, tr("Save annotations"),
+                                     tr("Could not save: %1").arg(err));
+                event->ignore();
+                return;
+            }
+        }
+    }
+    QMainWindow::closeEvent(event);
 }

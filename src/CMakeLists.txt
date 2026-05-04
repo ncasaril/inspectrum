@@ -27,9 +27,10 @@ endif (NOT CMAKE_CXX_FLAGS)
 # This only works in cmake >3.1
 set(CMAKE_CXX_STANDARD 14)
 
-list(APPEND inspectrum_sources 
+list(APPEND inspectrum_sources
     abstractsamplesource.cpp
     amplitudedemod.cpp
+    annotationdialog.cpp
     cursor.cpp
     cursors.cpp
     main.cpp

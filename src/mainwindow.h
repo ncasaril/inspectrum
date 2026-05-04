@@ -38,9 +38,21 @@ public slots:
     void setSampleRate(double rate);
     void setFormat(QString fmt);
     void invalidateEvent() override;
+    // Persist the current annotation list to a .sigmf-meta sidecar via
+    // InputSource::saveAnnotations. Triggered by the dock button.
+    void saveAnnotations();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private:
+    void onAnnotationsChanged();
+    void refreshWindowTitle();
+
     SpectrogramControls *dock;
     PlotView *plots;
     InputSource *input;
+    // Remembered base title (no dirty marker); refreshWindowTitle appends
+    // "*" when annotations are unsaved.
+    QString baseTitle;
 };

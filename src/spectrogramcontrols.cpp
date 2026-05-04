@@ -180,6 +180,15 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     annoColorCheckBox = new QCheckBox(widget);
     layout->addRow(new QLabel(tr("Annotation Colors:")), annoColorCheckBox);
 
+    saveAnnotationsButton = new QPushButton(tr("Save annotations"), widget);
+    saveAnnotationsButton->setEnabled(false);
+    saveAnnotationsButton->setToolTip(tr(
+        "Write the current annotation list to a .sigmf-meta sidecar next to "
+        "the data file. Becomes enabled after add/edit/delete."));
+    layout->addRow(saveAnnotationsButton);
+    connect(saveAnnotationsButton, &QPushButton::clicked,
+            this, &SpectrogramControls::saveAnnotationsRequested);
+
     // Derived plots settings
     layout->addRow(new QLabel()); // spacer
     layout->addRow(new QLabel(tr("<b>Derived Plots</b>")));
@@ -433,6 +442,12 @@ void SpectrogramControls::zoomOut()
 void SpectrogramControls::enableAnnotations(bool enabled) {
     // disable annotation comments checkbox when annotations are disabled
     commentsCheckBox->setEnabled(enabled);
+}
+
+void SpectrogramControls::setAnnotationsDirty(bool dirty)
+{
+    saveAnnotationsButton->setEnabled(dirty);
+    saveAnnotationsButton->setText(dirty ? tr("Save annotations *") : tr("Save annotations"));
 }
 
 void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN)

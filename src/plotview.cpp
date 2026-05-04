@@ -18,6 +18,7 @@
  */
 
 #include "plotview.h"
+#include "annotationdialog.h"
 #include "frequencydemod.h"
 #include "util.h"
 #include <QPixmapCache>
@@ -74,6 +75,12 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
     addPlot(spectrogramPlot);
 
     mainSampleSource->subscribe(this);
+
+    // Repaint annotation overlays whenever the input source's annotation
+    // list changes (add / edit / delete / save). Title-bar dirty handling
+    // lives in MainWindow, which sets its own callback after construction.
+    static_cast<InputSource*>(mainSampleSource)
+        ->addAnnotationCallback([this]() { onAnnotationsChanged(); });
 
     // Debounced re-analysis of the visible FM trace's dominant period.
     // Restarted from updateView() and from every FM-filter setter so the
@@ -622,6 +629,69 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     );
     menu.addAction(save);
 
+    // Annotation actions: edit/delete if the click landed on one, or "Add
+    // annotation here" otherwise (only on the spectrogram). The list is
+    // accessed via the InputSource so saves and dirty-tracking flow through.
+    if (selectedPlot == spectrogramPlot) {
+        int hitIdx = spectrogramPlot->annotationIndexAt(clickX, clickY);
+        if (hitIdx >= 0) {
+            auto editAct = new QAction("Edit annotation...", &menu);
+            connect(editAct, &QAction::triggered, this, [=]() {
+                promptEditAnnotation(hitIdx);
+            });
+            menu.addAction(editAct);
+
+            auto delAct = new QAction("Delete annotation", &menu);
+            connect(delAct, &QAction::triggered, this, [=]() {
+                deleteAnnotation(hitIdx);
+            });
+            menu.addAction(delAct);
+        } else {
+            auto addAct = new QAction("Add annotation here", &menu);
+            connect(addAct, &QAction::triggered, this, [=]() {
+                // Pick bounds from the surrounding state so the user gets a
+                // sensible starting region without dragging:
+                //   time:  cursor selection if any, else current view
+                //   freq:  tuner pass-band if enabled, else ±5% of Fs around
+                //          the click y
+                size_t s0, s1;
+                if (cursorsEnabled) {
+                    s0 = selectedSamples.minimum;
+                    s1 = selectedSamples.minimum + selectedSamples.length();
+                } else {
+                    s0 = viewRange.minimum;
+                    s1 = s0 + viewRange.length();
+                }
+                double fLo, fHi;
+                if (spectrogramPlot->tunerEnabled()) {
+                    auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
+                    double centre = inputSrc->getFrequency()
+                                  + spectrogramPlot->tunerOffsetHz();
+                    double half   = 0.5 * spectrogramPlot->tunerBandwidthHz();
+                    fLo = centre - half;
+                    fHi = centre + half;
+                } else {
+                    int yLocal = clickY + verticalScrollBar()->value();
+                    double centre = spectrogramPlot->freqAtPlotY(yLocal);
+                    double half   = 0.05 * sampleRate;
+                    fLo = centre - half;
+                    fHi = centre + half;
+                }
+                Annotation a;
+                a.sampleRange = {s0, s1 > s0 ? s1 - 1 : s0};
+                a.frequencyRange = {fLo, fHi};
+                a.boxColor = QColor(255, 200, 0, 180);
+                AnnotationDialog dlg(a, sampleRate, this);
+                if (dlg.exec() == QDialog::Accepted) {
+                    auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
+                    inputSrc->addAnnotation(dlg.result());
+                }
+            });
+            menu.addAction(addAct);
+        }
+        menu.addSeparator();
+    }
+
     // Add action to remove the selected plot (only for derived plots)
     auto rem = new QAction("Remove plot", &menu);
     connect(
@@ -668,11 +738,115 @@ void PlotView::enableCursors(bool enabled)
     viewport()->update();
 }
 
+bool PlotView::isOverSpectrogram(int viewportY) const
+{
+    if (!spectrogramPlot) return false;
+    int top = -verticalScrollBar()->value();
+    int bottom = top + spectrogramPlot->height();
+    return viewportY >= top && viewportY < bottom;
+}
+
+bool PlotView::startAnnotationDrag(QMouseEvent *event)
+{
+    if (!isOverSpectrogram(event->pos().y()))
+        return false;
+    annotDragging = true;
+    annotDragOrigin = event->pos();
+    if (!annotRubber)
+        annotRubber = new QRubberBand(QRubberBand::Rectangle, viewport());
+    annotRubber->setGeometry(QRect(annotDragOrigin, QSize()));
+    annotRubber->show();
+    return true;
+}
+
+void PlotView::updateAnnotationDrag(QMouseEvent *event)
+{
+    if (!annotDragging || !annotRubber) return;
+    annotRubber->setGeometry(QRect(annotDragOrigin, event->pos()).normalized());
+}
+
+void PlotView::finishAnnotationDrag(QMouseEvent *event)
+{
+    if (!annotDragging) return;
+    annotDragging = false;
+    QRect rect = QRect(annotDragOrigin, event->pos()).normalized();
+    if (annotRubber)
+        annotRubber->hide();
+    // Demand a minimum extent so an accidental click doesn't pop the dialog.
+    if (rect.width() < 4 || rect.height() < 4)
+        return;
+    promptNewAnnotation(rect);
+}
+
+void PlotView::promptNewAnnotation(QRect viewportRect)
+{
+    if (!spectrogramPlot) return;
+    int hscroll = horizontalScrollBar()->value();
+    size_t s0 = columnToSample(viewportRect.left()  + hscroll);
+    size_t s1 = columnToSample(viewportRect.right() + hscroll);
+    if (s1 < s0) std::swap(s0, s1);
+    int specTop = -verticalScrollBar()->value();
+    int yTopLocal    = viewportRect.top()    - specTop;
+    int yBottomLocal = viewportRect.bottom() - specTop;
+    double fHi = spectrogramPlot->freqAtPlotY(yTopLocal);
+    double fLo = spectrogramPlot->freqAtPlotY(yBottomLocal);
+    if (fHi < fLo) std::swap(fHi, fLo);
+
+    Annotation a;
+    a.sampleRange = {s0, s1};
+    a.frequencyRange = {fLo, fHi};
+    a.boxColor = QColor(255, 200, 0, 180);
+    AnnotationDialog dlg(a, sampleRate, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+        inputSrc->addAnnotation(dlg.result());
+    }
+}
+
+void PlotView::promptEditAnnotation(int index)
+{
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    if (index < 0 || index >= (int)inputSrc->annotationList.size())
+        return;
+    AnnotationDialog dlg(inputSrc->annotationList[index], sampleRate, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        inputSrc->updateAnnotation(index, dlg.result());
+    }
+}
+
+void PlotView::deleteAnnotation(int index)
+{
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    inputSrc->removeAnnotation(index);
+}
+
+void PlotView::onAnnotationsChanged()
+{
+    viewport()->update();
+}
+
 bool PlotView::viewportEvent(QEvent *event) {
     if (event->type() == QEvent::MouseMove) {
         LatencyLog::mark("MouseMove ----------");
     } else if (event->type() == QEvent::Wheel) {
         LatencyLog::mark("Wheel ----------");
+    }
+    // Shift+left-drag rectangle on the spectrogram → new annotation. Run
+    // before the per-plot dispatch so it doesn't accidentally drag the tuner.
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto *me = static_cast<QMouseEvent*>(event);
+        if (me->button() == Qt::LeftButton &&
+            (me->modifiers() & Qt::ShiftModifier) &&
+            spectrogramPlot &&
+            startAnnotationDrag(me)) {
+            return true;
+        }
+    } else if (event->type() == QEvent::MouseMove && annotDragging) {
+        updateAnnotationDrag(static_cast<QMouseEvent*>(event));
+        return true;
+    } else if (event->type() == QEvent::MouseButtonRelease && annotDragging) {
+        finishAnnotationDrag(static_cast<QMouseEvent*>(event));
+        return true;
     }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
@@ -1078,6 +1252,8 @@ bool PlotView::writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src
             ann.insert("core:freq_upper_edge", a.frequencyRange.maximum);
             if (!a.label.isEmpty())
                 ann.insert("core:label", a.label);
+            if (!a.description.isEmpty())
+                ann.insert("core:description", a.description);
             if (!a.comment.isEmpty())
                 ann.insert("core:comment", a.comment);
             if (a.boxColor.isValid() && a.boxColor != QColor("white"))

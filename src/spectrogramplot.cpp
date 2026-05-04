@@ -242,6 +242,40 @@ QString *SpectrogramPlot::mouseAnnotationComment(const QMouseEvent *event) {
     return nullptr;
 }
 
+int SpectrogramPlot::annotationIndexAt(int x, int y) const
+{
+    // visibleAnnotationLocations is built in the same order as the source
+    // annotationList, so the position in the visible table is the index we
+    // want. Topmost wins on overlap (last drawn = first found from the back).
+    for (int i = (int)visibleAnnotationLocations.size() - 1; i >= 0; --i) {
+        // const_cast: AnnotationLocation::isInside is non-const for legacy
+        // reasons; the call doesn't mutate.
+        auto &loc = const_cast<AnnotationLocation&>(visibleAnnotationLocations[i]);
+        if (loc.isInside(x, y)) {
+            // Find this annotation in the source list by simple comparison;
+            // direct vector index isn't safe because not every annotation is
+            // in visibleAnnotationLocations (off-screen entries are skipped).
+            for (size_t j = 0; j < inputSource->annotationList.size(); ++j) {
+                const auto &a = inputSource->annotationList[j];
+                if (a.sampleRange.minimum == loc.annotation.sampleRange.minimum &&
+                    a.sampleRange.maximum == loc.annotation.sampleRange.maximum &&
+                    a.frequencyRange.minimum == loc.annotation.frequencyRange.minimum &&
+                    a.frequencyRange.maximum == loc.annotation.frequencyRange.maximum) {
+                    return (int)j;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+double SpectrogramPlot::freqAtPlotY(int y) const
+{
+    if (height() <= 0 || sampleRate <= 0.0) return 0.0;
+    const double offset = ((double)height() * 0.5 - (double)y) * sampleRate / (double)height();
+    return inputSource->getFrequency() + offset;
+}
+
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     if (!inputSource || inputSource->count() == 0)
