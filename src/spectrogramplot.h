@@ -37,6 +37,16 @@
 class TileCacheKey;
 class AnnotationLocation;
 
+// Render mode for the top spectrogram. Standard = |STFT|² with the existing
+// per-frame FFT path. Reassigned = Fulop-Fitz reassignment: three FFTs per
+// frame (analysis window h, time-weighted t·h, and derivative h') used to
+// move each bin's energy to its local centre of mass (t̂, ω̂). See
+// SpectrogramPlot::computeReassignedTile() for the maths.
+enum class SpectrogramMode {
+    Standard = 0,
+    Reassigned = 1,
+};
+
 class SpectrogramPlot : public Plot
 {
     Q_OBJECT
@@ -70,6 +80,14 @@ public slots:
     void setZoomLevel(int zoom);
     void setSkip(int skip);
     void tunerMoved();
+    // Switch between the standard |STFT|² spectrogram and the Fulop-Fitz
+    // reassigned spectrogram. Only the rendering path changes; FFT size,
+    // zoom, and tuner state are preserved.
+    void setSpectrogramMode(int mode);
+    // Per-bin power floor (dB) below which reassignment is skipped — those
+    // bins are rendered at their original (t,ω) so the noise floor still
+    // shows up but isn't smeared by meaningless reassignment vectors.
+    void setReassignmentFloor(int floorDb);
 
 private:
     const int linesPerGraduation = 50;
@@ -78,7 +96,16 @@ private:
     std::shared_ptr<SampleSource<std::complex<float>>> inputSource;
     std::vector<AnnotationLocation> visibleAnnotationLocations;
     std::unique_ptr<FFT> fft;
+    // Reassignment companions to `fft` — same size, separate FFTW plans so
+    // the three transforms per frame don't trash each other's buffers.
+    std::unique_ptr<FFT> fftTimeWeighted;
+    std::unique_ptr<FFT> fftDerivative;
     std::unique_ptr<float[]> window;
+    // Time-weighted (t·h(n), centred t = n - (N-1)/2) and derivative (h'(n),
+    // closed form for Hann) windows used by the reassignment path. Allocated
+    // and filled in setFFTSize() alongside the analysis window.
+    std::unique_ptr<float[]> windowTimeWeighted;
+    std::unique_ptr<float[]> windowDerivative;
     QCache<TileCacheKey, QPixmap> pixmapCache;
     QCache<TileCacheKey, std::array<float, tileSize>> fftCache;
     uint colormap[256];
@@ -93,6 +120,11 @@ private:
     bool sigmfAnnotationsEnabled;
     bool sigmfAnnotationLabels;
     bool sigmfAnnotationColors;
+    SpectrogramMode mode = SpectrogramMode::Standard;
+    // Bins below this power (dB, same scale as powerMax/powerMin) are not
+    // reassigned. Default -80 dB matches the Auger-Flandrin recommendation
+    // for visualisation and keeps noise speckle out of the reassigned image.
+    int reassignmentFloorDb = -80;
 
     Tuner tuner;
     std::shared_ptr<TunerTransform> tunerTransform;
@@ -116,6 +148,11 @@ private:
     QPixmap* getPixmapTile(size_t tile);
     float* getFFTTile(size_t tile);
     void getLine(float *dest, size_t sample);
+    // Compute one full reassigned tile: zero-init the destination, then for
+    // each frame run three FFTs (h, t·h, h'), compute (t̂, ω̂) per bin and
+    // bilinearly splat |X_h|² into the accumulator. Result is converted to
+    // dB so the colormap stage stays unchanged.
+    void computeReassignedTile(float *dest, size_t tile);
     int getStride();
     float getTunerPhaseInc();
     std::vector<float> getTunerTaps();
@@ -128,24 +165,36 @@ class TileCacheKey
 {
 
 public:
-    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample) {
+    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample,
+                 SpectrogramMode mode = SpectrogramMode::Standard,
+                 int reassignmentFloorDb = 0) {
         this->fftSize = fftSize;
         this->zoomLevel = zoomLevel;
         this->nfftSkip = nfftSkip;
         this->sample = sample;
+        this->mode = mode;
+        // Threshold only affects reassigned output — collapse to 0 for
+        // Standard tiles so changing the slider doesn't invalidate the
+        // standard cache.
+        this->reassignmentFloorDb =
+            (mode == SpectrogramMode::Reassigned) ? reassignmentFloorDb : 0;
     }
 
     bool operator==(const TileCacheKey &k2) const {
         return (this->fftSize == k2.fftSize) &&
                (this->zoomLevel == k2.zoomLevel) &&
                (this->nfftSkip == k2.nfftSkip) &&
-               (this->sample == k2.sample);
+               (this->sample == k2.sample) &&
+               (this->mode == k2.mode) &&
+               (this->reassignmentFloorDb == k2.reassignmentFloorDb);
     }
 
     int fftSize;
     int zoomLevel;
     int nfftSkip;
     size_t sample;
+    SpectrogramMode mode;
+    int reassignmentFloorDb;
 };
 
 class AnnotationLocation

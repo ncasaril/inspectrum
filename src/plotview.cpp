@@ -215,6 +215,20 @@ void PlotView::setPeriodAnalysisEnabled(bool enabled)
     }
 }
 
+void PlotView::setSpectrogramMode(int mode)
+{
+    if (spectrogramPlot) {
+        spectrogramPlot->setSpectrogramMode(mode);
+    }
+}
+
+void PlotView::setReassignmentFloor(int floorDb)
+{
+    if (spectrogramPlot) {
+        spectrogramPlot->setReassignmentFloor(floorDb);
+    }
+}
+
 void PlotView::analyzeVisiblePeriod()
 {
     // Find the first derived float-source plot (FM trace by convention) and
