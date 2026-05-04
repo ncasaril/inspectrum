@@ -21,6 +21,7 @@
 #include "spectrogramcontrols.h"
 #include <QIntValidator>
 #include <QFileDialog>
+#include <QHBoxLayout>
 #include <QSettings>
 #include <QLabel>
 #include <cmath>
@@ -69,6 +70,78 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     scalesCheckBox = new QCheckBox(widget);
     scalesCheckBox->setCheckState(Qt::Checked);
     layout->addRow(new QLabel(tr("Scales:")), scalesCheckBox);
+
+    // Spectrogram render mode: Standard (the existing |STFT|² path) or
+    // Reassigned (Fulop-Fitz time-frequency reassignment). Default is
+    // Standard so behaviour is unchanged for users who don't touch it.
+    spectrogramModeCombo = new QComboBox(widget);
+    spectrogramModeCombo->addItem(tr("Standard"));
+    spectrogramModeCombo->addItem(tr("Reassigned"));
+    spectrogramModeCombo->setCurrentIndex(0);
+    spectrogramModeCombo->setToolTip(tr(
+        "Render mode for the top spectrogram. Reassigned uses Fulop-Fitz "
+        "time-frequency reassignment (3× FFT cost) to sharpen tonal and "
+        "chirp ridges. Below the noise floor threshold, bins are left at "
+        "their original location."));
+    layout->addRow(new QLabel(tr("Render mode:")), spectrogramModeCombo);
+    connect(spectrogramModeCombo,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::spectrogramModeChanged);
+
+    // Reassignment noise floor (dB). Default -80 follows the Auger-Flandrin
+    // recommendation; below this threshold the bin is rendered at its
+    // original (t,ω) instead of being reassigned, which would otherwise
+    // produce meaningless speckle in noise regions.
+    reassignmentFloorSlider = new QSlider(Qt::Horizontal, widget);
+    reassignmentFloorSlider->setRange(-140, -20);
+    reassignmentFloorSlider->setValue(-80);
+    reassignmentFloorSlider->setToolTip(tr(
+        "Bins with power below this threshold are not reassigned. -80 dB "
+        "matches the Auger-Flandrin recommendation; lower values reassign "
+        "more (and may speckle), higher values reassign less."));
+    reassignmentFloorValueLabel = new QLabel(QStringLiteral("-80 dB"), widget);
+    {
+        auto *floorRow = new QWidget(widget);
+        auto *floorLayout = new QHBoxLayout(floorRow);
+        floorLayout->setContentsMargins(0, 0, 0, 0);
+        floorLayout->addWidget(reassignmentFloorSlider, 1);
+        floorLayout->addWidget(reassignmentFloorValueLabel);
+        layout->addRow(new QLabel(tr("Reassign floor:")), floorRow);
+    }
+    connect(reassignmentFloorSlider, &QSlider::valueChanged,
+            this, [this](int v) {
+        reassignmentFloorValueLabel->setText(QString("%1 dB").arg(v));
+        emit reassignmentFloorChanged(v);
+    });
+
+    // Reassignment analysis window: Gaussian gives sharper ridges than Hann
+    // for tonal/chirp signals at the same FFT cost. Order matches WindowType.
+    reassignmentWindowCombo = new QComboBox(widget);
+    reassignmentWindowCombo->addItem(tr("Hann"));
+    reassignmentWindowCombo->addItem(tr("Gaussian"));
+    reassignmentWindowCombo->setCurrentIndex(0);
+    reassignmentWindowCombo->setToolTip(tr(
+        "Analysis window for the reassigned spectrogram. Gaussian is the "
+        "textbook reassignment window — its own Fourier eigenfunction — "
+        "and gives sharper ridges. Standard mode always uses Hann."));
+    layout->addRow(new QLabel(tr("Reassign window:")), reassignmentWindowCombo);
+    connect(reassignmentWindowCombo,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::reassignmentWindowChanged);
+
+    // Reassignment splat method. Order matches SplatMethod.
+    reassignmentSplatCombo = new QComboBox(widget);
+    reassignmentSplatCombo->addItem(tr("Bilinear"));
+    reassignmentSplatCombo->addItem(tr("Nearest"));
+    reassignmentSplatCombo->setCurrentIndex(0);
+    reassignmentSplatCombo->setToolTip(tr(
+        "How |X_h|² is distributed onto the reassigned grid. Bilinear "
+        "(default) writes to the 4 nearest pixels; Nearest writes to one "
+        "and is ~4× cheaper on the inner loop."));
+    layout->addRow(new QLabel(tr("Reassign splat:")), reassignmentSplatCombo);
+    connect(reassignmentSplatCombo,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::reassignmentSplatChanged);
 
     // Time selection settings
     layout->addRow(new QLabel()); // TODO: find a better way to add an empty row?

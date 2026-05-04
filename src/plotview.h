@@ -98,6 +98,13 @@ public slots:
     // Toggle the period analyser. When off, no scan runs and any existing
     // markers / period label are cleared.
     void setPeriodAnalysisEnabled(bool enabled);
+    // Forward dock changes to the spectrogram render mode / reassignment
+    // floor. The spectrogram plot owns the actual rendering state; these
+    // are pure pass-throughs.
+    void setSpectrogramMode(int mode);
+    void setReassignmentFloor(int floorDb);
+    void setReassignmentWindow(int wt);
+    void setReassignmentSplat(int sm);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;

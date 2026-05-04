@@ -20,6 +20,7 @@
 #pragma once
 
 #include <QCache>
+#include <QMutex>
 #include <QString>
 #include <QWidget>
 #include "fft.h"
@@ -30,12 +31,52 @@
 
 #include <memory>
 #include <array>
+#include <complex>
 #include <limits>
 #include <math.h>
 #include <vector>
 
 class TileCacheKey;
 class AnnotationLocation;
+
+// Render mode for the top spectrogram. Standard = |STFT|² with the existing
+// per-frame FFT path. Reassigned = Fulop-Fitz reassignment: three FFTs per
+// frame (analysis window h, time-weighted t·h, and derivative h') used to
+// move each bin's energy to its local centre of mass (t̂, ω̂). See
+// SpectrogramPlot::computeReassignedTile() for the maths.
+enum class SpectrogramMode {
+    Standard = 0,
+    Reassigned = 1,
+};
+
+// Analysis window. Hann is the spectrogram default; Gaussian is the
+// textbook reassignment window (its own Fourier eigenfunction → sharper
+// reassigned ridges) and only kicks in when Reassigned mode is active.
+enum class WindowType {
+    Hann = 0,
+    Gaussian = 1,
+};
+
+// How |X_h|² gets distributed onto the output grid at the reassigned
+// coordinates. Bilinear is the default (least aliasing); Nearest is ~4×
+// cheaper on the inner loop and visually fine for well-concentrated
+// signals.
+enum class SplatMethod {
+    Bilinear = 0,
+    Nearest = 1,
+};
+
+// Per-worker FFT plans + scratch buffers used by computeReassignedTile().
+// FFTW plans are not thread-safe (creation must be serialised, and each
+// plan owns its in/out buffers), so parallel tile pre-warm needs one of
+// these per worker. Pool lives on SpectrogramPlot.
+struct FftWorkSet {
+    std::unique_ptr<FFT> fftH, fftTH, fftDH;
+    std::vector<std::complex<float>> bufH, bufTH, bufDH;
+    std::vector<std::complex<float>> outH, outTH, outDH;
+    std::vector<float> accum;   // cols * fftSize linear-power accumulator
+    int size = 0;               // FFT size this set was built for
+};
 
 class SpectrogramPlot : public Plot
 {
@@ -70,6 +111,20 @@ public slots:
     void setZoomLevel(int zoom);
     void setSkip(int skip);
     void tunerMoved();
+    // Switch between the standard |STFT|² spectrogram and the Fulop-Fitz
+    // reassigned spectrogram. Only the rendering path changes; FFT size,
+    // zoom, and tuner state are preserved.
+    void setSpectrogramMode(int mode);
+    // Per-bin power floor (dB) below which reassignment is skipped — those
+    // bins are rendered at their original (t,ω) so the noise floor still
+    // shows up but isn't smeared by meaningless reassignment vectors.
+    void setReassignmentFloor(int floorDb);
+    // Choose between Hann (default) and Gaussian analysis windows for the
+    // reassigned spectrogram. Standard mode always uses Hann.
+    void setWindowType(int wt);
+    // Choose Bilinear (default, smoother) vs Nearest (~4× cheaper inner
+    // loop) when accumulating |X_h|² onto the reassigned grid.
+    void setSplatMethod(int sm);
 
 private:
     const int linesPerGraduation = 50;
@@ -79,6 +134,11 @@ private:
     std::vector<AnnotationLocation> visibleAnnotationLocations;
     std::unique_ptr<FFT> fft;
     std::unique_ptr<float[]> window;
+    // Time-weighted (t·h(n), centred t = n - (N-1)/2) and derivative (h'(n),
+    // closed form for Hann) windows used by the reassignment path. Allocated
+    // and filled in setFFTSize() alongside the analysis window.
+    std::unique_ptr<float[]> windowTimeWeighted;
+    std::unique_ptr<float[]> windowDerivative;
     QCache<TileCacheKey, QPixmap> pixmapCache;
     QCache<TileCacheKey, std::array<float, tileSize>> fftCache;
     uint colormap[256];
@@ -93,6 +153,23 @@ private:
     bool sigmfAnnotationsEnabled;
     bool sigmfAnnotationLabels;
     bool sigmfAnnotationColors;
+    SpectrogramMode mode = SpectrogramMode::Standard;
+    // Bins below this power (dB, same scale as powerMax/powerMin) are not
+    // reassigned. Default -80 dB matches the Auger-Flandrin recommendation
+    // for visualisation and keeps noise speckle out of the reassigned image.
+    int reassignmentFloorDb = -80;
+    // Analysis window for the reassigned path; standard mode is hard-pinned
+    // to Hann so toggling this doesn't surprise users in Standard mode.
+    WindowType windowType = WindowType::Hann;
+    // Splat method when accumulating reassigned energy.
+    SplatMethod splatMethod = SplatMethod::Bilinear;
+
+    // Worker FFT plan + buffer pool for parallel reassigned tile compute.
+    // Plans must be created on a single thread (FFTW planning isn't
+    // thread-safe), so the pool is grown synchronously on the GUI thread
+    // before workers run; workers only call fftwf_execute (thread-safe).
+    QMutex contextPoolMutex_;
+    std::vector<std::unique_ptr<FftWorkSet>> contextPool_;
 
     Tuner tuner;
     std::shared_ptr<TunerTransform> tunerTransform;
@@ -116,6 +193,33 @@ private:
     QPixmap* getPixmapTile(size_t tile);
     float* getFFTTile(size_t tile);
     void getLine(float *dest, size_t sample);
+    // (Re)compute the analysis window and its companions based on the
+    // current `fftSize` and `windowType`. Called from setFFTSize() and on
+    // window-type toggles.
+    void rebuildWindows();
+    // Compute one full standard |STFT|² tile using the FFT plan and
+    // buffers in `set`. Drop-in replacement for the previous getLine()
+    // loop; the work-set indirection lets multiple tiles compute in
+    // parallel safely. Output layout matches getFFTTile()'s contract.
+    void computeStandardTile(float *dest, size_t tile, FftWorkSet &set);
+    // Compute one full reassigned tile: zero-init the destination, then for
+    // each frame run three FFTs (h, t·h, h'), compute (t̂, ω̂) per bin and
+    // splat |X_h|² into the accumulator. Result is converted to dB so the
+    // colormap stage stays unchanged. The work set carries the per-thread
+    // FFT plans + buffers so multiple workers can compute tiles in parallel.
+    void computeReassignedTile(float *dest, size_t tile, FftWorkSet &set);
+    // Pool helpers. acquire/release are thread-safe (mutex-guarded).
+    // ensureWorkSetPool grows the pool on the GUI thread before parallel
+    // dispatch so no worker has to do FFTW planning. invalidate clears the
+    // pool when the FFT size changes (plans are size-specific).
+    std::unique_ptr<FftWorkSet> acquireWorkSet();
+    void releaseWorkSet(std::unique_ptr<FftWorkSet> set);
+    void ensureWorkSetPool(int target);
+    void invalidateWorkSetPool();
+    // Compute the cache-miss tile list in parallel and insert results
+    // into fftCache. Dispatches Standard or Reassigned compute based on
+    // the current mode; both modes share the same pool.
+    void prewarmTiles(const std::vector<size_t> &tiles);
     int getStride();
     float getTunerPhaseInc();
     std::vector<float> getTunerTaps();
@@ -128,24 +232,43 @@ class TileCacheKey
 {
 
 public:
-    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample) {
+    TileCacheKey(int fftSize, int zoomLevel, int nfftSkip, size_t sample,
+                 SpectrogramMode mode = SpectrogramMode::Standard,
+                 int reassignmentFloorDb = 0,
+                 WindowType windowType = WindowType::Hann,
+                 SplatMethod splatMethod = SplatMethod::Bilinear) {
         this->fftSize = fftSize;
         this->zoomLevel = zoomLevel;
         this->nfftSkip = nfftSkip;
         this->sample = sample;
+        this->mode = mode;
+        // Reassignment-only knobs collapse to defaults in Standard tiles so
+        // changing them doesn't invalidate the standard cache.
+        const bool reassigned = (mode == SpectrogramMode::Reassigned);
+        this->reassignmentFloorDb = reassigned ? reassignmentFloorDb : 0;
+        this->windowType = reassigned ? windowType : WindowType::Hann;
+        this->splatMethod = reassigned ? splatMethod : SplatMethod::Bilinear;
     }
 
     bool operator==(const TileCacheKey &k2) const {
         return (this->fftSize == k2.fftSize) &&
                (this->zoomLevel == k2.zoomLevel) &&
                (this->nfftSkip == k2.nfftSkip) &&
-               (this->sample == k2.sample);
+               (this->sample == k2.sample) &&
+               (this->mode == k2.mode) &&
+               (this->reassignmentFloorDb == k2.reassignmentFloorDb) &&
+               (this->windowType == k2.windowType) &&
+               (this->splatMethod == k2.splatMethod);
     }
 
     int fftSize;
     int zoomLevel;
     int nfftSkip;
     size_t sample;
+    SpectrogramMode mode;
+    int reassignmentFloorDb;
+    WindowType windowType;
+    SplatMethod splatMethod;
 };
 
 class AnnotationLocation

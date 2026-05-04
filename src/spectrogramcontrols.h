@@ -65,6 +65,17 @@ signals:
     // filter change, label updates, and triangle/line overlay drawn on
     // the FM trace.
     void periodAnalysisChanged(bool enabled);
+    // Spectrogram render mode (Standard | Reassigned). Index matches
+    // SpectrogramMode enum.
+    void spectrogramModeChanged(int mode);
+    // Per-bin power floor (dB) below which reassignment is skipped.
+    void reassignmentFloorChanged(int floorDb);
+    // Reassignment analysis window (Hann | Gaussian). Index matches
+    // WindowType enum.
+    void reassignmentWindowChanged(int wt);
+    // Reassignment splat method (Bilinear | Nearest). Index matches
+    // SplatMethod enum.
+    void reassignmentSplatChanged(int sm);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -100,6 +111,20 @@ public:
     QSlider *zoomLevelSlider;
     QSlider *powerMaxSlider;
     QSlider *powerMinSlider;
+    // Top spectrogram render mode: Standard |STFT|² (index 0) or
+    // Fulop-Fitz reassigned spectrogram (index 1). Default = Standard.
+    QComboBox *spectrogramModeCombo;
+    // Per-bin power floor (dB) for reassignment. Bins below this threshold
+    // are not reassigned — they're rendered at their original (t, ω) so
+    // noise context stays visible without speckle.
+    QSlider *reassignmentFloorSlider;
+    QLabel *reassignmentFloorValueLabel;
+    // Reassignment analysis window (default Hann; Gaussian gives sharper
+    // ridges as it's the textbook reassignment window).
+    QComboBox *reassignmentWindowCombo;
+    // Reassignment splat method (default Bilinear; Nearest is ~4× faster
+    // on the inner loop with mild aliasing).
+    QComboBox *reassignmentSplatCombo;
     QCheckBox *cursorsCheckBox;
     QSpinBox *cursorSymbolsSpinBox;
     QLabel *rateLabel;
