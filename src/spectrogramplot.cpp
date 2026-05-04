@@ -251,10 +251,12 @@ void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> s
     size_t tileID = sampleRange.minimum - sampleOffset;
     int xoffset = sampleOffset / getStride();
 
-    // Reassigned mode: collect all visible tile IDs, find the cache misses,
-    // and compute them in parallel before the main paint loop. The paint
-    // loop itself is unchanged — getPixmapTile() will hit the cache.
-    if (mode == SpectrogramMode::Reassigned) {
+    // Both modes: collect visible tile IDs, find cache misses, and compute
+    // them in parallel before the main paint loop. The loop below is
+    // unchanged — getPixmapTile() will hit the cache for everything we
+    // pre-warmed. Reassigned mode benefits more (3× FFT cost), but the
+    // standard path is also dominated by FFT compute on cold-cache scrolls.
+    {
         std::vector<size_t> visible;
         size_t walk = tileID;
         visible.push_back(walk);
@@ -274,7 +276,7 @@ void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> s
             if (fftCache.contains(key)) continue;
             missing.push_back(t);
         }
-        prewarmReassignedTiles(missing);
+        prewarmTiles(missing);
     }
 
     // Paint first (possibly partial) tile
@@ -328,23 +330,17 @@ float* SpectrogramPlot::getFFTTile(size_t tile)
         return obj->data();
 
     std::array<float, tileSize>* destStorage = new std::array<float, tileSize>;
+    // Both modes go through the work-set pool so the synchronous path
+    // shares plan + buffer reuse with the parallel pre-warm path in
+    // paintMid. Single-tile cache misses just acquire the same set every
+    // call — pool stays at size 1, no contention.
+    auto set = acquireWorkSet();
     if (mode == SpectrogramMode::Reassigned) {
-        // Reassignment can move energy across frame boundaries within a
-        // tile, so we have to compute the whole tile in one pass instead of
-        // line-by-line. We borrow a work set from the pool — the same pool
-        // workers use for parallel pre-warm in paintMid.
-        auto set = acquireWorkSet();
         computeReassignedTile(destStorage->data(), tile, *set);
-        releaseWorkSet(std::move(set));
     } else {
-        float *ptr = destStorage->data();
-        size_t sample = tile;
-        while ((ptr - destStorage->data()) < tileSize) {
-            getLine(ptr, sample);
-            sample += getStride();
-            ptr += fftSize;
-        }
+        computeStandardTile(destStorage->data(), tile, *set);
     }
+    releaseWorkSet(std::move(set));
     fftCache.insert(key, destStorage);
     return destStorage->data();
 }
@@ -451,9 +447,9 @@ void SpectrogramPlot::invalidateWorkSetPool()
     contextPool_.clear();
 }
 
-void SpectrogramPlot::prewarmReassignedTiles(const std::vector<size_t> &tiles)
+void SpectrogramPlot::prewarmTiles(const std::vector<size_t> &tiles)
 {
-    if (tiles.empty() || mode != SpectrogramMode::Reassigned) return;
+    if (tiles.empty()) return;
 
     int maxThreads = QThreadPool::globalInstance()->maxThreadCount();
     if (maxThreads < 1) maxThreads = 1;
@@ -472,15 +468,23 @@ void SpectrogramPlot::prewarmReassignedTiles(const std::vector<size_t> &tiles)
         std::array<float, tileSize>* data = nullptr;
     };
 
+    // Snapshot the mode so a mid-flight mode toggle can't make some workers
+    // compute Standard and others Reassigned for the same paint.
+    SpectrogramMode capturedMode = mode;
+
     QFutureSynchronizer<TileResult> sync;
     for (size_t tileID : tiles) {
-        sync.addFuture(QtConcurrent::run([this, tileID]() -> TileResult {
+        sync.addFuture(QtConcurrent::run([this, tileID, capturedMode]() -> TileResult {
             TileResult r;
             r.tile = tileID;
             auto storage = std::unique_ptr<std::array<float, tileSize>>(
                 new std::array<float, tileSize>);
             auto set = acquireWorkSet();
-            computeReassignedTile(storage->data(), tileID, *set);
+            if (capturedMode == SpectrogramMode::Reassigned) {
+                computeReassignedTile(storage->data(), tileID, *set);
+            } else {
+                computeStandardTile(storage->data(), tileID, *set);
+            }
             releaseWorkSet(std::move(set));
             r.data = storage.release();
             return r;
@@ -493,9 +497,45 @@ void SpectrogramPlot::prewarmReassignedTiles(const std::vector<size_t> &tiles)
     for (const auto &fut : sync.futures()) {
         auto r = fut.result();
         if (!r.data) continue;
-        TileCacheKey key(fftSize, zoomLevel, nfftSkip, r.tile, mode,
+        TileCacheKey key(fftSize, zoomLevel, nfftSkip, r.tile, capturedMode,
                          reassignmentFloorDb, windowType, splatMethod);
         fftCache.insert(key, r.data);
+    }
+}
+
+void SpectrogramPlot::computeStandardTile(float *dest, size_t tile, FftWorkSet &set)
+{
+    // Per-frame |STFT|² in dB. Same maths as the original getLine() loop —
+    // window, FFT, fftshift to put DC in the centre row, log-power — but
+    // reads/writes go through `set` so the function is reentrant and can
+    // run on a worker thread alongside other tile computes.
+    const int N = fftSize;
+    const int cols = linesPerTile();
+    const int stride = getStride();
+    const float invFFTSize = 1.0f / N;
+    const float logMultiplier = 10.0f / log2f(10.0f);
+    const float negInf = -std::numeric_limits<float>::infinity();
+
+    for (int c = 0; c < cols; c++) {
+        size_t sample = tile + static_cast<size_t>(c) * stride;
+        const auto first_sample = std::max(static_cast<ssize_t>(sample) - N / 2,
+                                           static_cast<ssize_t>(0));
+        auto buffer = inputSource->getSamples(first_sample, N);
+        float *lineDest = dest + static_cast<size_t>(c) * N;
+        if (buffer == nullptr) {
+            for (int i = 0; i < N; i++) lineDest[i] = negInf;
+            continue;
+        }
+        for (int i = 0; i < N; i++) {
+            set.bufH[i] = buffer[i] * window[i];
+        }
+        set.fftH->process(set.outH.data(), set.bufH.data());
+        for (int i = 0; i < N; i++) {
+            int k = i ^ (N >> 1);
+            auto s = set.outH[k] * invFFTSize;
+            float power = s.real() * s.real() + s.imag() * s.imag();
+            lineDest[i] = log2f(power) * logMultiplier;
+        }
     }
 }
 

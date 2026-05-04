@@ -197,6 +197,11 @@ private:
     // current `fftSize` and `windowType`. Called from setFFTSize() and on
     // window-type toggles.
     void rebuildWindows();
+    // Compute one full standard |STFT|² tile using the FFT plan and
+    // buffers in `set`. Drop-in replacement for the previous getLine()
+    // loop; the work-set indirection lets multiple tiles compute in
+    // parallel safely. Output layout matches getFFTTile()'s contract.
+    void computeStandardTile(float *dest, size_t tile, FftWorkSet &set);
     // Compute one full reassigned tile: zero-init the destination, then for
     // each frame run three FFTs (h, t·h, h'), compute (t̂, ω̂) per bin and
     // splat |X_h|² into the accumulator. Result is converted to dB so the
@@ -211,10 +216,10 @@ private:
     void releaseWorkSet(std::unique_ptr<FftWorkSet> set);
     void ensureWorkSetPool(int target);
     void invalidateWorkSetPool();
-    // Compute reassigned tiles for the cache-miss list in parallel and
-    // insert the results into fftCache. No-op if the list is empty or
-    // mode != Reassigned.
-    void prewarmReassignedTiles(const std::vector<size_t> &tiles);
+    // Compute the cache-miss tile list in parallel and insert results
+    // into fftCache. Dispatches Standard or Reassigned compute based on
+    // the current mode; both modes share the same pool.
+    void prewarmTiles(const std::vector<size_t> &tiles);
     int getStride();
     float getTunerPhaseInc();
     std::vector<float> getTunerTaps();
