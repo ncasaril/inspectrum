@@ -229,6 +229,20 @@ void PlotView::setReassignmentFloor(int floorDb)
     }
 }
 
+void PlotView::setReassignmentWindow(int wt)
+{
+    if (spectrogramPlot) {
+        spectrogramPlot->setWindowType(wt);
+    }
+}
+
+void PlotView::setReassignmentSplat(int sm)
+{
+    if (spectrogramPlot) {
+        spectrogramPlot->setSplatMethod(sm);
+    }
+}
+
 void PlotView::analyzeVisiblePeriod()
 {
     // Find the first derived float-source plot (FM trace by convention) and

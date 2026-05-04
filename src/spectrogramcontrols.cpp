@@ -114,6 +114,35 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         emit reassignmentFloorChanged(v);
     });
 
+    // Reassignment analysis window: Gaussian gives sharper ridges than Hann
+    // for tonal/chirp signals at the same FFT cost. Order matches WindowType.
+    reassignmentWindowCombo = new QComboBox(widget);
+    reassignmentWindowCombo->addItem(tr("Hann"));
+    reassignmentWindowCombo->addItem(tr("Gaussian"));
+    reassignmentWindowCombo->setCurrentIndex(0);
+    reassignmentWindowCombo->setToolTip(tr(
+        "Analysis window for the reassigned spectrogram. Gaussian is the "
+        "textbook reassignment window — its own Fourier eigenfunction — "
+        "and gives sharper ridges. Standard mode always uses Hann."));
+    layout->addRow(new QLabel(tr("Reassign window:")), reassignmentWindowCombo);
+    connect(reassignmentWindowCombo,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::reassignmentWindowChanged);
+
+    // Reassignment splat method. Order matches SplatMethod.
+    reassignmentSplatCombo = new QComboBox(widget);
+    reassignmentSplatCombo->addItem(tr("Bilinear"));
+    reassignmentSplatCombo->addItem(tr("Nearest"));
+    reassignmentSplatCombo->setCurrentIndex(0);
+    reassignmentSplatCombo->setToolTip(tr(
+        "How |X_h|² is distributed onto the reassigned grid. Bilinear "
+        "(default) writes to the 4 nearest pixels; Nearest writes to one "
+        "and is ~4× cheaper on the inner loop."));
+    layout->addRow(new QLabel(tr("Reassign splat:")), reassignmentSplatCombo);
+    connect(reassignmentSplatCombo,
+            static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &SpectrogramControls::reassignmentSplatChanged);
+
     // Time selection settings
     layout->addRow(new QLabel()); // TODO: find a better way to add an empty row?
     layout->addRow(new QLabel(tr("<b>Time selection</b>")));

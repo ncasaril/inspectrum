@@ -77,6 +77,8 @@ MainWindow::MainWindow()
     // noise-floor threshold. Both end up on SpectrogramPlot via PlotView.
     connect(dock, &SpectrogramControls::spectrogramModeChanged, plots, &PlotView::setSpectrogramMode);
     connect(dock, &SpectrogramControls::reassignmentFloorChanged, plots, &PlotView::setReassignmentFloor);
+    connect(dock, &SpectrogramControls::reassignmentWindowChanged, plots, &PlotView::setReassignmentWindow);
+    connect(dock, &SpectrogramControls::reassignmentSplatChanged, plots, &PlotView::setReassignmentSplat);
     connect(dock->cursorSymbolsSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged), plots, &PlotView::setCursorSegments);
 
     // Connect dock outputs

@@ -103,6 +103,8 @@ public slots:
     // are pure pass-throughs.
     void setSpectrogramMode(int mode);
     void setReassignmentFloor(int floorDb);
+    void setReassignmentWindow(int wt);
+    void setReassignmentSplat(int sm);
 
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;

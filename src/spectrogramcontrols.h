@@ -70,6 +70,12 @@ signals:
     void spectrogramModeChanged(int mode);
     // Per-bin power floor (dB) below which reassignment is skipped.
     void reassignmentFloorChanged(int floorDb);
+    // Reassignment analysis window (Hann | Gaussian). Index matches
+    // WindowType enum.
+    void reassignmentWindowChanged(int wt);
+    // Reassignment splat method (Bilinear | Nearest). Index matches
+    // SplatMethod enum.
+    void reassignmentSplatChanged(int sm);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -113,6 +119,12 @@ public:
     // noise context stays visible without speckle.
     QSlider *reassignmentFloorSlider;
     QLabel *reassignmentFloorValueLabel;
+    // Reassignment analysis window (default Hann; Gaussian gives sharper
+    // ridges as it's the textbook reassignment window).
+    QComboBox *reassignmentWindowCombo;
+    // Reassignment splat method (default Bilinear; Nearest is ~4× faster
+    // on the inner loop with mild aliasing).
+    QComboBox *reassignmentSplatCombo;
     QCheckBox *cursorsCheckBox;
     QSpinBox *cursorSymbolsSpinBox;
     QLabel *rateLabel;
