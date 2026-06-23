@@ -42,6 +42,14 @@
 #include <QFile>
 #include <QColor>
 #include <QXmlStreamReader>
+#include <QStandardPaths>
+#include <QDir>
+#include <QDateTime>
+#include <QCryptographicHash>
+
+#ifdef HAVE_ZSTD
+#include <zstd.h>
+#endif
 
 
 class ComplexF32SampleAdapter : public SampleAdapter {
@@ -278,6 +286,113 @@ static std::vector<TarEntry> parseTar(const uchar *data, qint64 totalSize)
     return entries;
 }
 
+// Transparent .zst support: stream-decompress a zstd file to disk. We can't
+// mmap compressed bytes (the whole sample pipeline reads via mmap), so the
+// pragmatic approach is to inflate to a cache file once and mmap that. The
+// decompressed output is whatever was compressed — typically a SigMF archive
+// (.sigmf tarball), an iq.tar, or a plain raw IQ file — and openFile is then
+// re-entered on it by suffix.
+
+#ifdef HAVE_ZSTD
+static void zstdDecompressToFile(const QString &src, const QString &dst)
+{
+    QFile in(src);
+    if (!in.open(QIODevice::ReadOnly))
+        throw std::runtime_error(("zstd: cannot open " + src + ": " + in.errorString()).toStdString());
+    QFile out(dst);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        throw std::runtime_error(("zstd: cannot write " + dst + ": " + out.errorString()).toStdString());
+
+    const size_t inCap = ZSTD_DStreamInSize();
+    const size_t outCap = ZSTD_DStreamOutSize();
+    std::vector<char> inBuf(inCap), outBuf(outCap);
+
+    ZSTD_DCtx *dctx = ZSTD_createDCtx();
+    if (dctx == nullptr)
+        throw std::runtime_error("zstd: failed to create decompression context");
+
+    size_t lastRet = 0;
+    qint64 n;
+    try {
+        while ((n = in.read(inBuf.data(), inCap)) > 0) {
+            ZSTD_inBuffer input = { inBuf.data(), static_cast<size_t>(n), 0 };
+            while (input.pos < input.size) {
+                ZSTD_outBuffer output = { outBuf.data(), outCap, 0 };
+                size_t ret = ZSTD_decompressStream(dctx, &output, &input);
+                if (ZSTD_isError(ret))
+                    throw std::runtime_error(std::string("zstd: ") + ZSTD_getErrorName(ret));
+                if (out.write(outBuf.data(), output.pos) != static_cast<qint64>(output.pos))
+                    throw std::runtime_error(("zstd: write failed: " + out.errorString()).toStdString());
+                lastRet = ret;
+            }
+        }
+        if (n < 0)
+            throw std::runtime_error(("zstd: read failed: " + in.errorString()).toStdString());
+        // A non-zero final return means the last frame ended mid-block, i.e. the
+        // input was truncated. Zero means we landed on a clean frame boundary.
+        if (lastRet != 0)
+            throw std::runtime_error("zstd: truncated or incomplete input stream");
+    } catch (...) {
+        ZSTD_freeDCtx(dctx);
+        out.remove();
+        throw;
+    }
+    ZSTD_freeDCtx(dctx);
+    if (!out.flush())
+        throw std::runtime_error(("zstd: flush failed: " + out.errorString()).toStdString());
+}
+#endif
+
+// Decompress `zstPath` into a per-source cache directory and return the path of
+// the inflated file. The cache key folds in size + mtime so a changed source
+// re-inflates, and a complete previous inflation is reused as-is.
+static QString decompressZstToCache(const QFileInfo &zstInfo)
+{
+#ifndef HAVE_ZSTD
+    (void)zstInfo;
+    throw std::runtime_error(
+        "This build has no zstd support; cannot open .zst input. "
+        "Install libzstd-dev (or libzstd) and rebuild.");
+#else
+    // Strip the .zst suffix to recover the inner filename (and thus its real
+    // suffix, which openFile dispatches on): foo.sigmf.zst -> foo.sigmf.
+    QString innerName = zstInfo.fileName();
+    innerName.chop(QString(".").length() + QString(zstInfo.suffix()).length()); // drop ".zst"
+
+    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (base.isEmpty())
+        base = QDir::tempPath();
+
+    QByteArray pathKey = zstInfo.absoluteFilePath().toUtf8();
+    QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(pathKey, QCryptographicHash::Sha1).toHex().left(16));
+    QString key = QString("%1-%2-%3")
+                      .arg(digest)
+                      .arg(zstInfo.size())
+                      .arg(zstInfo.lastModified().toMSecsSinceEpoch());
+
+    QDir cacheDir(base + "/zst-cache/" + key);
+    if (!cacheDir.exists() && !cacheDir.mkpath("."))
+        throw std::runtime_error(("zstd: cannot create cache dir " + cacheDir.path()).toStdString());
+
+    QString outPath = cacheDir.filePath(innerName);
+    QString donePath = outPath + ".done";
+
+    // Reuse a prior complete inflation. The .done marker guards against a
+    // half-written output left behind by an interrupted run.
+    if (QFileInfo::exists(outPath) && QFileInfo::exists(donePath))
+        return outPath;
+
+    zstdDecompressToFile(zstInfo.absoluteFilePath(), outPath);
+
+    QFile marker(donePath);
+    if (marker.open(QIODevice::WriteOnly))
+        marker.close();
+
+    return outPath;
+#endif
+}
+
 } // namespace
 
 InputSource::InputSource()
@@ -309,8 +424,14 @@ QJsonObject InputSource::readMetaData(const QString &filename)
         throw std::runtime_error("Error while opening meta data file: " + datafile.errorString().toStdString());
     }
 
-    QJsonDocument d = QJsonDocument::fromJson(datafile.readAll());
+    QByteArray bytes = datafile.readAll();
     datafile.close();
+    return parseMetaDocument(bytes);
+}
+
+QJsonObject InputSource::parseMetaDocument(const QByteArray &bytes)
+{
+    QJsonDocument d = QJsonDocument::fromJson(bytes);
     auto root = d.object();
 
     if (!root.contains("global") || !root["global"].isObject()) {
@@ -504,6 +625,31 @@ void InputSource::openIqTar(const uchar *data, qint64 size)
     frequency = centerFreq;
 }
 
+void InputSource::openSigmfArchive(const uchar *data, qint64 size)
+{
+    auto entries = parseTar(data, size);
+
+    const TarEntry *metaEntry = nullptr;
+    const TarEntry *dataEntry = nullptr;
+    for (const auto &e : entries) {
+        if (e.name.endsWith(".sigmf-meta", Qt::CaseInsensitive)) metaEntry = &e;
+        else if (e.name.endsWith(".sigmf-data", Qt::CaseInsensitive)) dataEntry = &e;
+    }
+    if (!metaEntry)
+        throw std::runtime_error("sigmf archive: no .sigmf-meta found in archive");
+    if (!dataEntry)
+        throw std::runtime_error("sigmf archive: no .sigmf-data found in archive");
+
+    QByteArray metaBytes(reinterpret_cast<const char*>(data + metaEntry->dataOffset),
+                         static_cast<int>(metaEntry->size));
+    // parseMetaDocument picks the sample adapter and sets sampleRate /
+    // frequency / annotations exactly as the .sigmf-* pair path does.
+    parseMetaDocument(metaBytes);
+
+    dataOffset = static_cast<size_t>(dataEntry->dataOffset);
+    sampleCount = dataEntry->size / sampleAdapter->sampleSize();
+}
+
 void InputSource::openFile(const char *filename)
 {
     QFileInfo fileInfo(filename);
@@ -516,6 +662,16 @@ void InputSource::openFile(const char *filename)
 
     // Default to no container offset; openIqTar overrides this for archives.
     dataOffset = 0;
+
+    // Transparent zstd input: inflate to a cache file, then re-enter openFile
+    // on the decompressed result so its real suffix (.sigmf, .iq.tar, .cf32, …)
+    // drives the rest of the dispatch. Skipped when an explicit fmt override is
+    // set, since that names the raw layout of `filename` itself.
+    if (_fmt.empty() && fileInfo.suffix().compare("zst", Qt::CaseInsensitive) == 0) {
+        QString decompressed = decompressZstToCache(fileInfo);
+        openFile(decompressed.toUtf8().constData());
+        return;
+    }
 
     // R&S iq.tar container — delegate to openIqTar which discovers format,
     // sample rate, center frequency, and the offset of the raw data file
@@ -626,7 +782,32 @@ void InputSource::openFile(const char *filename)
         }
     }
     else if (suffix == "sigmf") {
-        throw std::runtime_error("SigMF archives are not supported. Consider extracting a recording.");
+        // SigMF archive (ustar bundling a .sigmf-meta + .sigmf-data). Parse it
+        // in place like iq.tar — the data is read at its offset inside the
+        // mmap'd archive, so there's no separate extraction copy.
+        auto file = std::make_unique<QFile>(filename);
+        if (!file->open(QFile::ReadOnly)) {
+            throw std::runtime_error(file->errorString().toStdString());
+        }
+        qint64 archiveSize = file->size();
+        uchar *data = file->map(0, archiveSize);
+        if (data == nullptr)
+            throw std::runtime_error("Error mmapping sigmf archive");
+
+        annotationList.clear();
+        dataOffset = 0;
+        try {
+            openSigmfArchive(data, archiveSize);
+        } catch (...) {
+            file->unmap(data);
+            throw;
+        }
+
+        cleanup();
+        inputFile = file.release();
+        mmapData = data;
+        invalidate();
+        return;
     }
     else {
         dataFilename = filename;

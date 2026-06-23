@@ -62,9 +62,19 @@ private:
     std::vector<AnnotationCallback> _annotCbs;
 
     QJsonObject readMetaData(const QString &filename);
+    // Parse a SigMF meta document (the JSON bytes of a .sigmf-meta) and apply
+    // it: pick the sampleAdapter from core:datatype and populate sampleRate /
+    // frequency / annotations. Shared by the .sigmf-* pair path and the
+    // in-archive path. Throws on invalid/unsupported meta.
+    QJsonObject parseMetaDocument(const QByteArray &bytes);
     // Populate sampleAdapter / sampleRate / sampleCount / frequency /
     // dataOffset from a memory-mapped R&S iq.tar archive. Throws on error.
     void openIqTar(const uchar *data, qint64 size);
+    // Populate the same fields from a memory-mapped SigMF archive (a ustar
+    // tarball bundling a .sigmf-meta + .sigmf-data, optionally produced by
+    // decompressing a .sigmf.zst). The data is read in place at its byte
+    // offset within the archive, so no separate extraction copy is made.
+    void openSigmfArchive(const uchar *data, qint64 size);
 
 public:
     InputSource();

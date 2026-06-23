@@ -58,9 +58,24 @@ find_package(Qt5Concurrent REQUIRED)
 find_package(FFTW REQUIRED)
 find_package(Liquid REQUIRED)
 
+# Optional: libzstd enables transparent loading of .zst-compressed inputs
+# (e.g. a zstd-compressed SigMF archive). The build still succeeds without it;
+# opening a .zst file then reports that zstd support was not compiled in.
+find_path(ZSTD_INCLUDE_DIR zstd.h)
+find_library(ZSTD_LIBRARY NAMES zstd)
+if (ZSTD_INCLUDE_DIR AND ZSTD_LIBRARY)
+    message(STATUS "zstd found (${ZSTD_LIBRARY}) — enabling transparent .zst input")
+    add_definitions(-DHAVE_ZSTD)
+    set(ZSTD_INCLUDES ${ZSTD_INCLUDE_DIR})
+    set(ZSTD_LIBRARIES ${ZSTD_LIBRARY})
+else()
+    message(STATUS "zstd not found — .zst inputs disabled (install libzstd-dev to enable)")
+endif()
+
 include_directories(
     ${FFTW_INCLUDES}
     ${LIQUID_INCLUDES}
+    ${ZSTD_INCLUDES}
 )
 
 add_executable(inspectrum ${EXE_ARGS} ${inspectrum_sources})
@@ -69,6 +84,7 @@ target_link_libraries(inspectrum
     Qt5::Core Qt5::Widgets Qt5::Concurrent
     ${FFTW_LIBRARIES}
     ${LIQUID_LIBRARIES}
+    ${ZSTD_LIBRARIES}
 )
 
 set(INSTALL_DEFAULT_BINDIR "bin" CACHE STRING "Appended to CMAKE_INSTALL_PREFIX")
