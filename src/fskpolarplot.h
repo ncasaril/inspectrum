@@ -40,6 +40,10 @@ public:
     // parts reach the scope. 0 disables the gate.
     void setLevelGate(int pct);
     void setSelection(bool enabled, range_t<size_t> sampleRange);
+    // Upstream changed (tuner retune, file/param change): drop the cached image
+    // and re-render. The render key only captures view geometry, so without
+    // this a retune at the same view/selection would re-blit a stale scope.
+    void invalidateEvent() override;
 
     // Everything that determines the rendered image. The worker re-runs only
     // when this changes, so hover/scroll that don't move the window are free.
@@ -51,9 +55,11 @@ public:
         int w = 0;
         int h = 0;
         int gatePct = 0;
+        unsigned epoch = 0;
         bool operator==(const RenderKey &o) const {
             return start == o.start && len == o.len && delay == o.delay &&
-                   w == o.w && h == o.h && gatePct == o.gatePct;
+                   w == o.w && h == o.h && gatePct == o.gatePct &&
+                   epoch == o.epoch;
         }
         bool operator!=(const RenderKey &o) const { return !(*this == o); }
     };
@@ -62,6 +68,7 @@ private:
     std::shared_ptr<SampleSource<std::complex<float>>> iqSource;
     double symbolRateHz = 0.0;
     int levelGatePct = 15;
+    unsigned dataEpoch_ = 0;
     bool selectionEnabled = false;
     range_t<size_t> selectedRange{0, 0};
 

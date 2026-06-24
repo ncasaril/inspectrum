@@ -125,6 +125,14 @@ void FskPolarPlot::setLevelGate(int pct)
     emit repaint();
 }
 
+void FskPolarPlot::invalidateEvent()
+{
+    // Bump the epoch so the next paint's RenderKey differs from the cached
+    // image and forces a re-render against the new upstream data.
+    ++dataEpoch_;
+    emit repaint();
+}
+
 void FskPolarPlot::setSelection(bool enabled, range_t<size_t> sampleRange)
 {
     selectionEnabled = enabled;
@@ -218,7 +226,7 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     if (w < 1 || h < 1)
         return;
 
-    const RenderKey key{start, len, delay, w, h, levelGatePct};
+    const RenderKey key{start, len, delay, w, h, levelGatePct, dataEpoch_};
     pendingKey_ = key;
     havePending_ = true;
 

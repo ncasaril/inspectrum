@@ -123,6 +123,12 @@ void HistogramPlot::setSelection(bool enabled, range_t<size_t> sampleRange)
     emit repaint();
 }
 
+void HistogramPlot::invalidateEvent()
+{
+    ++dataEpoch_;
+    emit repaint();
+}
+
 void HistogramPlot::paintBack(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     Q_UNUSED(sampleRange);
@@ -154,7 +160,7 @@ void HistogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sam
     if (w < 1 || h < 1)
         return;
 
-    const RenderKey key{start, len, w, h};
+    const RenderKey key{start, len, w, h, dataEpoch_};
     pendingKey_ = key;
     havePending_ = true;
 

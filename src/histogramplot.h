@@ -29,6 +29,10 @@ public:
     void paintBack(QPainter &painter, QRect &rect, range_t<size_t> sampleRange) override;
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange) override;
     void setSelection(bool enabled, range_t<size_t> sampleRange);
+    // Re-render on upstream change (tuner retune, file/param change); the render
+    // key only captures view geometry, so without this a retune would re-blit a
+    // stale histogram.
+    void invalidateEvent() override;
 
     // Public so the file-scope worker render helper can take it by value.
     struct RenderKey {
@@ -36,14 +40,17 @@ public:
         size_t len = 0;
         int w = 0;
         int h = 0;
+        unsigned epoch = 0;
         bool operator==(const RenderKey &o) const {
-            return start == o.start && len == o.len && w == o.w && h == o.h;
+            return start == o.start && len == o.len && w == o.w && h == o.h &&
+                   epoch == o.epoch;
         }
         bool operator!=(const RenderKey &o) const { return !(*this == o); }
     };
 
 private:
     std::shared_ptr<SampleSource<float>> floatSource;
+    unsigned dataEpoch_ = 0;
     bool selectionEnabled = false;
     range_t<size_t> selectedRange{0, 0};
 
