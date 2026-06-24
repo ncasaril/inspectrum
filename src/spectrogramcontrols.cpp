@@ -294,6 +294,20 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("FM decim (N):")), fmDecimSpinBox);
     connect(fmDecimSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::fmDecimChanged);
+    // FM amplitude squelch: blank the discriminator output where the carrier
+    // amplitude is below this % of the window peak, so noise in the gaps
+    // between bursts stops dominating the FM trace's autoscale. 0 = off.
+    fmSquelchSpinBox = new QSpinBox(widget);
+    fmSquelchSpinBox->setRange(0, 100);
+    fmSquelchSpinBox->setValue(0);
+    fmSquelchSpinBox->setSuffix("%");
+    fmSquelchSpinBox->setToolTip(tr(
+        "Blank the FM trace where the carrier amplitude |IQ| is below this "
+        "fraction of the window peak, so receiver noise between bursts doesn't "
+        "blow out the y-axis. 0 disables."));
+    layout->addRow(new QLabel(tr("FM squelch:")), fmSquelchSpinBox);
+    connect(fmSquelchSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::fmSquelchChanged);
 
     // Auto-tune button: ask PlotView to pick reasonable values for cutoff,
     // predemod M, and post N. PlotView computes from current Fs and tuner

@@ -58,6 +58,8 @@ signals:
     void fmPredemodDecimChanged(int m);
     // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
     void symbolRateChanged(double baud);
+    // Amplitude squelch (% of window-peak |IQ|) for FM plots. 0 = off.
+    void fmSquelchChanged(int pct);
     // Signal-strength gate (% of window peak) for the FSK polar constellation.
     void constellationGateChanged(int pct);
     // Symbol-timed (1 point/symbol) vs full-rate FSK polar constellation.
@@ -174,6 +176,8 @@ public:
     QSpinBox   *fmDecimSpinBox;
     // FM pre-demod IQ decimation (1 disables)
     QSpinBox   *fmPredemodDecimSpinBox;
+    // FM amplitude squelch (% of window-peak |IQ|; 0 disables)
+    QSpinBox   *fmSquelchSpinBox;
     // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
     QPushButton *fmAutoLpfButton;
     // Symbol rate (Bd) for the FSK polar plot, plus a button that copies the

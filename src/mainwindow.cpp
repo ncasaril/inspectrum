@@ -74,6 +74,8 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmLpfMethodChanged, plots, &PlotView::setFmLpfMethod);
     connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
+    // FM amplitude squelch (% of window-peak |IQ|).
+    connect(dock, &SpectrogramControls::fmSquelchChanged, plots, &PlotView::setFmSquelch);
     // Symbol rate (Bd) for the FSK polar plot's differential delay.
     connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
     // Signal-strength gate (%) for the FSK polar constellation.

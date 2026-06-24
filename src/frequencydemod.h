@@ -70,6 +70,11 @@ public:
     // demod and post-LPF at a low rate keeps the post-LPF in a numerically
     // well-conditioned regime and shrinks every filter's tap budget.
     void setPredemodDecimation(int m);
+    // Amplitude squelch as a fraction (0..1) of the window's peak carrier
+    // amplitude |IQ|. Samples below it are blanked to NaN so receiver noise in
+    // the gaps between bursts (where the discriminator output swings wildly)
+    // doesn't dominate the autoscale or the trace. 0 disables.
+    void setAmplitudeSquelch(double frac);
 
 private:
     // Liquid-DSP frequency demodulator object
@@ -99,6 +104,8 @@ private:
     // Pre-demod IQ decimation factor (1 = disabled). When >1 the batched
     // path runs the entire chain at Fs/M.
     int          predemodDecim_ = 1;
+    // Amplitude squelch fraction (0..1) of window-peak |IQ|; 0 = disabled.
+    double       squelchFrac_ = 0.0;
 
     void destroyPostLpf();
     void rebuildPostLpf();

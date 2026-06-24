@@ -237,6 +237,22 @@ void PlotView::setFmPredemodDecimation(int m)
     if (periodTimer) periodTimer->start();
 }
 
+// Amplitude squelch (% of window-peak |IQ|) for every FM plot. Blanks the
+// discriminator output in the noise gaps so it stops dominating the autoscale.
+void PlotView::setFmSquelch(int pct)
+{
+    fmSquelchPct = pct;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get()))
+                fd->setAmplitudeSquelch(pct / 100.0);
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
 void PlotView::autoTuneFmLpf()
 {
     if (!spectrogramPlot || sampleRate <= 0.0) return;
@@ -430,6 +446,7 @@ void PlotView::addPlot(Plot *plot)
             fd->setPostDecimation(fmDecim);
             fd->setPredemodDecimation(fmPredemodDecim);
             fd->setCheapDemod(fmFastDemod);
+            fd->setAmplitudeSquelch(fmSquelchPct / 100.0);
         }
         if (auto fsk = dynamic_cast<FskDemod*>(tp->source().get())) {
             fsk->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));

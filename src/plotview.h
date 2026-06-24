@@ -93,6 +93,8 @@ public slots:
     void setFmDecimation(int n);
     // Pre-demod IQ decimation factor (1 = off).
     void setFmPredemodDecimation(int m);
+    // Amplitude squelch (% of window-peak |IQ|) for every FM plot. 0 = off.
+    void setFmSquelch(int pct);
     // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
     void setSymbolRate(double baud);
     // Signal-strength gate (% of window peak) for the FSK polar constellation.
@@ -188,6 +190,7 @@ private:
     int    fmDecim = 1;
     int    fmPredemodDecim = 1;
     bool   fmFastDemod = false;
+    int    fmSquelchPct = 0; // amplitude squelch (% of window-peak |IQ|), 0 = off
     // Symbol rate (baud) re-applied to FSK polar plots as they're added. 0 = unset.
     double symbolRateHz = 0.0;
     // Constellation signal-strength gate (% of window peak), re-applied likewise.
