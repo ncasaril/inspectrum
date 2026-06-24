@@ -24,9 +24,21 @@
 #include <QHBoxLayout>
 #include <QSettings>
 #include <QLabel>
+#include <QSizePolicy>
 #include <cmath>
 #include <string>
 #include "util.h"
+
+namespace {
+// Stop a label with dynamic, variable-length text from driving the dock's
+// minimum width (and thus reflowing the central plot view) as its content
+// changes. Ignored horizontal policy => 0 contribution to the layout minimum.
+void makeWidthStable(QLabel *label)
+{
+    label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    label->setMinimumWidth(0);
+}
+} // namespace
 
 SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent)
     : QDockWidget::QDockWidget(title, parent)
@@ -197,6 +209,14 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         "Auto-detected dominant period of the visible FM trace, estimated "
         "from zero-crossings around the trace's mean. Updates as you pan, "
         "zoom or change filter settings."));
+    // These two labels are rewritten with variable-width text on every mouse
+    // move / analysis pass. A plain QLabel reports its full text width as its
+    // minimum size, so a non-wrapping label here would grow the dock's minimum
+    // width and reflow the central spectrogram ("everything jumps") whenever
+    // the readout got longer. Ignored horizontal policy makes them contribute
+    // 0 to the dock's minimum width — the column stays fixed and long values
+    // just clip (the full value is still in the tooltip and the status bar).
+    makeWidthStable(autoPeriodLabel);
     layout->addRow(new QLabel(tr("Auto period:")), autoPeriodLabel);
     periodAnalysisCheckBox = new QCheckBox(widget);
     periodAnalysisCheckBox->setCheckState(Qt::Unchecked);
@@ -211,6 +231,7 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     cursorValueLabel->setToolTip(tr(
         "Sample value at the mouse cursor when hovering over a derived "
         "trace plot. Float for FM/AM/threshold, I+Q+|·| for IQ."));
+    makeWidthStable(cursorValueLabel);
     layout->addRow(new QLabel(tr("Cursor value:")), cursorValueLabel);
     derivedPlotHeightSpinBox = new QSpinBox(widget);
     derivedPlotHeightSpinBox->setRange(20, 1000);
