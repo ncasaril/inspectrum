@@ -21,8 +21,6 @@ namespace {
 // (~600 TETRA symbols) — plenty of points for a dense constellation without an
 // unbounded getSamples through the tuner FIR.
 constexpr size_t kMaxSamples = 500000;
-// Cap the differential-product loop so very wide windows stay fast.
-constexpr size_t kMaxPoints = 400000;
 constexpr double kMinMag = 1e-8;
 
 static double radiusFor(int w, int h)
@@ -52,9 +50,9 @@ static QImage renderConstellation(std::shared_ptr<SampleSource<std::complex<floa
 
     std::vector<uint32_t> hits(static_cast<size_t>(k.w) * k.h, 0);
     uint32_t maxHit = 0;
-    const size_t usable = k.len - k.delay;
-    const size_t step = std::max<size_t>(1, usable / kMaxPoints);
-    for (size_t i = k.delay; i < k.len; i += step) {
+    // k.len is capped at kMaxSamples, so visiting every sample is already a
+    // bounded (≤500k) loop — no decimation stride needed.
+    for (size_t i = k.delay; i < k.len; ++i) {
         const auto d = samples[i] * std::conj(samples[i - k.delay]);
         const double mag = std::abs(d);
         if (!std::isfinite(mag) || mag < kMinMag)
@@ -114,7 +112,15 @@ size_t FskPolarPlot::delayForRate() const
     const double rate = iqSource ? iqSource->rate() : 0.0;
     if (symbolRateHz > 0.0 && rate > 0.0) {
         const double d = rate / symbolRateHz; // samples per symbol
-        return std::max<size_t>(1, std::min<size_t>(8192, static_cast<size_t>(d + 0.5)));
+        const size_t want = static_cast<size_t>(d + 0.5);
+        // The differential needs both s[i] and s[i-delay] inside the render
+        // window. If one symbol exceeds the window the constellation can't be
+        // formed — return 0 so the caller hints, rather than silently clamping
+        // to a wrong delay that would still draw a (meaningless) ring while the
+        // overlay claimed it was one symbol.
+        if (want < 1 || want + 1 >= kMaxSamples)
+            return 0;
+        return want; // exact round(Fs/baud) — the overlay's "1 symbol" holds
     }
     return 0; // no symbol rate → caller draws a hint instead of a smear
 }
@@ -161,12 +167,14 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
 
     const size_t delay = delayForRate();
     if (delay == 0) {
-        // No symbol rate set: a wrong delay would draw a meaningless ring, so
-        // prompt instead. (This replaces the old zoom-dependent fallback.)
+        // Either no symbol rate, or a symbol period too long for the window —
+        // both draw a hint rather than a meaningless ring.
         painter.save();
         painter.setPen(QColor(200, 200, 200));
-        painter.drawText(rect, Qt::AlignCenter,
-                         QStringLiteral("set Symbol rate (Bd)\nto view the constellation"));
+        const QString msg = (symbolRateHz > 0.0)
+            ? QStringLiteral("symbol period too long for the window\n(decimate, or raise the symbol rate)")
+            : QStringLiteral("set Symbol rate (Bd)\nto view the constellation");
+        painter.drawText(rect, Qt::AlignCenter, msg);
         painter.restore();
         return;
     }

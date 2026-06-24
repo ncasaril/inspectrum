@@ -81,11 +81,22 @@ void FskDemod::work(void *input, void *output, int count, size_t sampleid)
     }
     movingAverage(absCentered, level, kLevelWindow);
 
-    // Peak deviation across the window, used as the squelch reference below.
+    // Peak deviation across the KEPT (visible) region, used as the squelch
+    // reference. Excluding the leading historySize() lead-in keeps the fade
+    // dependent only on what's on screen — otherwise a strong burst just left
+    // of the visible edge would raise the floor and shift the fade as you pan.
+    const int lead = std::min<int>(count, static_cast<int>(historySize()));
     float peakLevel = 0.0f;
-    for (int i = 0; i < count; ++i) {
+    for (int i = lead; i < count; ++i) {
         if (level[i] > peakLevel)
             peakLevel = level[i];
+    }
+    if (peakLevel == 0.0f) {
+        // Window shorter than the lead-in (or an all-zero kept region): fall
+        // back to the full span so there's still a reference.
+        for (int i = 0; i < count; ++i)
+            if (level[i] > peakLevel)
+                peakLevel = level[i];
     }
     const float squelchFloor = peakLevel * kSquelchFrac;
 

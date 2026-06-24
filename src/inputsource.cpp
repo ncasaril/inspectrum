@@ -676,6 +676,11 @@ void InputSource::openFile(const char *filename)
     // Without this reset a baseband file opened after a frequency-tagged one
     // would inherit the previous file's center and mislabel the abs-freq axis.
     frequency = 0.0;
+    // Likewise reset the real-signal flag: the format branches below (and the
+    // container paths) set it true where appropriate, but a complex file
+    // opened after a real one would otherwise inherit the stale true and get a
+    // single-sided spectrogram. (The plain-.tar→cf32 fallback relies on this.)
+    _realSignal = false;
     std::string suffix = std::string(fileInfo.suffix().toLower().toUtf8().constData());
     if (_fmt != "") { suffix = _fmt; } // allow fmt override
 
