@@ -58,6 +58,8 @@ signals:
     void fmPredemodDecimChanged(int m);
     // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
     void symbolRateChanged(double baud);
+    // Signal-strength gate (% of window peak) for the FSK polar constellation.
+    void constellationGateChanged(int pct);
     // User clicked "Auto-tune FM LPF" — PlotView picks values from the
     // current Fs / tuner bandwidth, applies them, then echoes them back
     // to applyAutoLpf so the dock widgets stay in sync.
@@ -176,6 +178,8 @@ public:
     // cursor-measured baud into it.
     QLineEdit   *symbolRateLineEdit;
     QPushButton *useMeasuredBaudButton;
+    // Signal-strength gate (%) for the FSK polar constellation.
+    QSpinBox    *constellationGateSpinBox;
     // Save annotations to a .sigmf-meta sidecar. Shown disabled when the
     // annotation list hasn't been mutated since the last load/save.
     QPushButton *saveAnnotationsButton;

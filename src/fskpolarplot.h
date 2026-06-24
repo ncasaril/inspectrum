@@ -35,6 +35,10 @@ public:
     // 0 (unset) draws nothing but a hint — a wrong delay yields a meaningless
     // smear, so we decline to guess.
     void setSymbolRate(double baud);
+    // Signal-strength gate as a percentage of the window's peak differential
+    // magnitude (0..100). Samples below it are dropped so only strong (in-burst)
+    // parts reach the scope. 0 disables the gate.
+    void setLevelGate(int pct);
     void setSelection(bool enabled, range_t<size_t> sampleRange);
 
     // Everything that determines the rendered image. The worker re-runs only
@@ -46,9 +50,10 @@ public:
         size_t delay = 0;
         int w = 0;
         int h = 0;
+        int gatePct = 0;
         bool operator==(const RenderKey &o) const {
             return start == o.start && len == o.len && delay == o.delay &&
-                   w == o.w && h == o.h;
+                   w == o.w && h == o.h && gatePct == o.gatePct;
         }
         bool operator!=(const RenderKey &o) const { return !(*this == o); }
     };
@@ -56,6 +61,7 @@ public:
 private:
     std::shared_ptr<SampleSource<std::complex<float>>> iqSource;
     double symbolRateHz = 0.0;
+    int levelGatePct = 15;
     bool selectionEnabled = false;
     range_t<size_t> selectedRange{0, 0};
 

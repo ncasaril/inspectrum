@@ -155,6 +155,17 @@ void PlotView::setSymbolRate(double baud)
     }
 }
 
+// Signal-strength gate (% of window peak) for the FSK polar plot's scope.
+void PlotView::setConstellationGate(int pct)
+{
+    constellationGatePct = pct;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setLevelGate(pct);
+        }
+    }
+}
+
 void PlotView::setFmDecimation(int n)
 {
     if (n < 1) n = 1;
@@ -419,6 +430,7 @@ void PlotView::addPlot(Plot *plot)
     }
     if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
         fskp->setSymbolRate(symbolRateHz);
+        fskp->setLevelGate(constellationGatePct);
         fskp->setSelection(cursorsEnabled, selectedSamples);
     }
     if (auto hist = dynamic_cast<HistogramPlot*>(plot)) {

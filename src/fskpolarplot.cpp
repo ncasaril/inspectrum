@@ -48,6 +48,27 @@ static QImage renderConstellation(std::shared_ptr<SampleSource<std::complex<floa
     const double cx = k.w / 2.0;
     const double cy = k.h / 2.0;
 
+    // Pass 1: window reference = peak differential magnitude |s[i]|·|s[i-delay]|.
+    // In-burst samples cluster near this; noise/gaps sit far below it.
+    double refMag = 0.0;
+    for (size_t i = k.delay; i < k.len; ++i) {
+        const auto d = samples[i] * std::conj(samples[i - k.delay]);
+        const double m = std::abs(d);
+        if (std::isfinite(m) && m > refMag)
+            refMag = m;
+    }
+    if (refMag < kMinMag)
+        return img;
+
+    // Signal-strength gate: drop samples below gatePct·peak so only strong
+    // (in-burst) parts reach the scope. Points are placed at radius |d|/refMag —
+    // NOT normalised to the unit circle — so weak residual points fall toward
+    // the centre instead of polluting the cluster ring, and symbol centres sit
+    // out near the rim. (The old per-point /mag normalisation is exactly what
+    // pulled noise up onto the circle.)
+    const double gate = std::max(refMag * (k.gatePct / 100.0), kMinMag);
+    const double rscale = radius / refMag;
+
     std::vector<uint32_t> hits(static_cast<size_t>(k.w) * k.h, 0);
     uint32_t maxHit = 0;
     // k.len is capped at kMaxSamples, so visiting every sample is already a
@@ -55,12 +76,10 @@ static QImage renderConstellation(std::shared_ptr<SampleSource<std::complex<floa
     for (size_t i = k.delay; i < k.len; ++i) {
         const auto d = samples[i] * std::conj(samples[i - k.delay]);
         const double mag = std::abs(d);
-        if (!std::isfinite(mag) || mag < kMinMag)
+        if (!std::isfinite(mag) || mag < gate)
             continue;
-        const double x = d.real() / mag;
-        const double y = d.imag() / mag;
-        const int px = static_cast<int>(std::lround(cx + x * radius));
-        const int py = static_cast<int>(std::lround(cy - y * radius));
+        const int px = static_cast<int>(std::lround(cx + d.real() * rscale));
+        const int py = static_cast<int>(std::lround(cy - d.imag() * rscale));
         if (px < 0 || px >= k.w || py < 0 || py >= k.h)
             continue;
         const uint32_t c = ++hits[static_cast<size_t>(py) * k.w + px];
@@ -97,6 +116,12 @@ FskPolarPlot::FskPolarPlot(std::shared_ptr<SampleSource<std::complex<float>>> so
 void FskPolarPlot::setSymbolRate(double baud)
 {
     symbolRateHz = baud > 0.0 ? baud : 0.0;
+    emit repaint();
+}
+
+void FskPolarPlot::setLevelGate(int pct)
+{
+    levelGatePct = std::max(0, std::min(100, pct));
     emit repaint();
 }
 
@@ -193,7 +218,7 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     if (w < 1 || h < 1)
         return;
 
-    const RenderKey key{start, len, delay, w, h};
+    const RenderKey key{start, len, delay, w, h, levelGatePct};
     pendingKey_ = key;
     havePending_ = true;
 
@@ -209,10 +234,11 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     painter.setPen(QColor(210, 210, 210));
     const QString scope = selectionEnabled ? QStringLiteral("selection")
                                            : QStringLiteral("visible");
-    const QString info = QStringLiteral("%1 · delay %2 samp = 1 symbol @ %3 Bd")
+    const QString info = QStringLiteral("%1 · delay %2 samp = 1 symbol @ %3 Bd · gate %4%")
                              .arg(scope)
                              .arg(delay)
-                             .arg(symbolRateHz, 0, 'f', symbolRateHz < 1000.0 ? 1 : 0);
+                             .arg(symbolRateHz, 0, 'f', symbolRateHz < 1000.0 ? 1 : 0)
+                             .arg(levelGatePct);
     painter.drawText(rect.left() + 6, rect.bottom() - 6, info);
     painter.restore();
 }

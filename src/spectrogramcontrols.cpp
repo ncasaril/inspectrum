@@ -341,6 +341,21 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
         }
     });
 
+    // Signal-strength gate for the FSK polar constellation: only samples whose
+    // differential magnitude exceeds this % of the window peak are plotted, so
+    // noise/dead-air between bursts stays off the scope.
+    constellationGateSpinBox = new QSpinBox(widget);
+    constellationGateSpinBox->setRange(0, 100);
+    constellationGateSpinBox->setValue(15);
+    constellationGateSpinBox->setSuffix("%");
+    constellationGateSpinBox->setToolTip(tr(
+        "Drop samples below this fraction of the window's peak level from the "
+        "FSK polar plot, so only strong (in-burst) parts form the constellation. "
+        "0 disables the gate."));
+    layout->addRow(new QLabel(tr("Constellation min level:")), constellationGateSpinBox);
+    connect(constellationGateSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &SpectrogramControls::constellationGateChanged);
+
     widget->setLayout(layout);
     setWidget(widget);
 

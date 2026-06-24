@@ -95,6 +95,8 @@ public slots:
     void setFmPredemodDecimation(int m);
     // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
     void setSymbolRate(double baud);
+    // Signal-strength gate (% of window peak) for the FSK polar constellation.
+    void setConstellationGate(int pct);
     // Pick reasonable LPF cutoff, predemod M, and post N from the current
     // sample rate and tuner bandwidth. Applies them and emits
     // fmAutoLpfComputed() so the dock widgets can mirror.
@@ -186,6 +188,8 @@ private:
     bool   fmFastDemod = false;
     // Symbol rate (baud) re-applied to FSK polar plots as they're added. 0 = unset.
     double symbolRateHz = 0.0;
+    // Constellation signal-strength gate (% of window peak), re-applied likewise.
+    int    constellationGatePct = 15;
     // Shift+left-drag annotation rubber-banding on the spectrogram. The
     // rectangle is in viewport coords; on release we map x→sample range and
     // y→absolute Hz range, then open AnnotationDialog.

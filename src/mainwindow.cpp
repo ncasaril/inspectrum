@@ -76,6 +76,8 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
     // Symbol rate (Bd) for the FSK polar plot's differential delay.
     connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
+    // Signal-strength gate (%) for the FSK polar constellation.
+    connect(dock, &SpectrogramControls::constellationGateChanged, plots, &PlotView::setConstellationGate);
     // Auto-tune button: dock asks PlotView, PlotView picks values and applies
     // them, then echoes them back so the dock widgets reflect the new state.
     connect(dock, &SpectrogramControls::autoLpfRequested, plots, &PlotView::autoTuneFmLpf);
