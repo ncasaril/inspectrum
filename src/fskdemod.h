@@ -20,6 +20,10 @@ public:
     FskDemod(std::shared_ptr<SampleSource<std::complex<float>>> src);
     size_t historySize() override;
     void work(void *input, void *output, int count, size_t sampleid) override;
+    // work() is a pure function of its input buffer (moving averages over
+    // locals, no member state — setters forward to the wrapped FrequencyDemod),
+    // so run it lock-free for concurrent tile rendering.
+    bool workIsReentrant() override { return true; }
 
     void setCheapDemod(bool enabled);
     void setPostLpfCutoff(double hz);

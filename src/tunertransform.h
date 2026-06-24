@@ -42,6 +42,13 @@ private:
 public:
     TunerTransform(std::shared_ptr<SampleSource<std::complex<float>>> src);
     void work(void *input, void *output, int count, size_t sampleid) override;
+    // work() uses only local NCO/FIR objects + a paramMutex_ snapshot, so it's
+    // reentrant — run it lock-free so every derived plot's tile workers can
+    // mix+filter the shared tuner output concurrently rather than single-file.
+    // Safety relies on liquid-dsp keeping all nco/firfilt/dotprod state
+    // per-object (true through >= v1.3.2); revisit if a liquid upgrade adds a
+    // shared design cache on the create paths.
+    bool workIsReentrant() override { return true; }
     void setFrequency(float frequency);
     void setTaps(std::vector<float> taps);
     void setRelativeBandwith(float bandwidth);
