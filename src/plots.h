@@ -40,6 +40,8 @@ public:
     static Plot* amplitudePlot(std::shared_ptr<AbstractSampleSource> source);
     static Plot* frequencyPlot(std::shared_ptr<AbstractSampleSource> source);
     static Plot* phasePlot(std::shared_ptr<AbstractSampleSource> source);
+    static Plot* fskPlot(std::shared_ptr<AbstractSampleSource> source);
+    static Plot* fskPolarPlot(std::shared_ptr<AbstractSampleSource> source);
     static Plot* thresholdPlot(std::shared_ptr<AbstractSampleSource> source);
 
     static class _init
@@ -49,6 +51,8 @@ public:
             plots.emplace(typeid(std::complex<float>), PlotInfo{"sample plot", samplePlot});
             plots.emplace(typeid(std::complex<float>), PlotInfo{"amplitude plot", amplitudePlot});
             plots.emplace(typeid(std::complex<float>), PlotInfo{"frequency plot", frequencyPlot});
+            plots.emplace(typeid(std::complex<float>), PlotInfo{"FSK plot", fskPlot});
+            plots.emplace(typeid(std::complex<float>), PlotInfo{"FSK polar plot", fskPolarPlot});
             plots.emplace(typeid(std::complex<float>), PlotInfo{"phase plot", phasePlot});
             plots.emplace(typeid(float), PlotInfo{"threshold plot", thresholdPlot});
         };

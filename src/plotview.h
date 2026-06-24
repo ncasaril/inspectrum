@@ -175,11 +175,13 @@ private:
     QTimer *periodTimer = nullptr;
     bool   periodAnalysisEnabled = false;
     void analyzeVisiblePeriod();
+    void updateFskPolarSelections();
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
     int    fmDecim = 1;
     int    fmPredemodDecim = 1;
+    bool   fmFastDemod = false;
     // Shift+left-drag annotation rubber-banding on the spectrogram. The
     // rectangle is in viewport coords; on release we map x→sample range and
     // y→absolute Hz range, then open AnnotationDialog.

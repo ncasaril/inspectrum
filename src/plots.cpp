@@ -19,6 +19,8 @@
 
 #include "amplitudedemod.h"
 #include "frequencydemod.h"
+#include "fskdemod.h"
+#include "fskpolarplot.h"
 #include "phasedemod.h"
 #include "threshold.h"
 #include "traceplot.h"
@@ -52,6 +54,20 @@ Plot* Plots::phasePlot(std::shared_ptr<AbstractSampleSource> source)
     typedef SampleSource<std::complex<float>> Source;
     std::shared_ptr<Source> concrete = std::dynamic_pointer_cast<Source>(source);
     return new TracePlot(std::make_shared<PhaseDemod>(concrete));
+}
+
+Plot* Plots::fskPlot(std::shared_ptr<AbstractSampleSource> source)
+{
+    typedef SampleSource<std::complex<float>> Source;
+    std::shared_ptr<Source> concrete = std::dynamic_pointer_cast<Source>(source);
+    return new TracePlot(std::make_shared<FskDemod>(concrete));
+}
+
+Plot* Plots::fskPolarPlot(std::shared_ptr<AbstractSampleSource> source)
+{
+    typedef SampleSource<std::complex<float>> Source;
+    std::shared_ptr<Source> concrete = std::dynamic_pointer_cast<Source>(source);
+    return new FskPolarPlot(concrete);
 }
 
 Plot* Plots::thresholdPlot(std::shared_ptr<AbstractSampleSource> source)

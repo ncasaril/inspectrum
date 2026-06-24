@@ -397,6 +397,7 @@ static QString decompressZstToCache(const QFileInfo &zstInfo)
 
 InputSource::InputSource()
 {
+    frequency = 0.0;
 }
 
 InputSource::~InputSource()
@@ -781,10 +782,12 @@ void InputSource::openFile(const char *filename)
             }
         }
     }
-    else if (suffix == "sigmf") {
-        // SigMF archive (ustar bundling a .sigmf-meta + .sigmf-data). Parse it
-        // in place like iq.tar — the data is read at its offset inside the
-        // mmap'd archive, so there's no separate extraction copy.
+    else if (suffix == "sigmf" || suffix == "tar") {
+        // SigMF archive (ustar bundling a .sigmf-meta + .sigmf-data). IQEngine
+        // uses .tar.zst, which decompresses to .tar, so accept both the SigMF
+        // archive suffix and a plain tar suffix here. Parse it in place like
+        // iq.tar — the data is read at its offset inside the mmap'd archive,
+        // so there's no separate extraction copy.
         auto file = std::make_unique<QFile>(filename);
         if (!file->open(QFile::ReadOnly)) {
             throw std::runtime_error(file->errorString().toStdString());

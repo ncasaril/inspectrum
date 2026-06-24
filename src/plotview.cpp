@@ -20,6 +20,8 @@
 #include "plotview.h"
 #include "annotationdialog.h"
 #include "frequencydemod.h"
+#include "fskdemod.h"
+#include "fskpolarplot.h"
 #include "util.h"
 #include <QPixmapCache>
 #include <climits>
@@ -95,6 +97,7 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
 
 void PlotView::enableFastDemod(bool enabled)
 {
+    fmFastDemod = enabled;
     // clear any cached trace tiles so new demod data is used
     QPixmapCache::clear();
     // walk all derived TracePlot instances and update their demod mode
@@ -103,6 +106,9 @@ void PlotView::enableFastDemod(bool enabled)
             auto src = tp->source();
             if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setCheapDemod(enabled);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setCheapDemod(enabled);
             }
         }
     }
@@ -121,9 +127,16 @@ void PlotView::setFmLpfCutoff(double hz)
     fmLpfCutoffHz = hz;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostLpfCutoff(hz);
             }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostLpfCutoff(hz);
+            }
+        }
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setReferenceCutoff(hz);
         }
     }
     QPixmapCache::clear();
@@ -137,8 +150,12 @@ void PlotView::setFmDecimation(int n)
     fmDecim = n;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostDecimation(n);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostDecimation(n);
             }
         }
     }
@@ -153,8 +170,12 @@ void PlotView::setFmLpfMethod(int method)
     auto m = static_cast<FrequencyDemod::LpfMethod>(method);
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostLpfMethod(m);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostLpfMethod(m);
             }
         }
     }
@@ -169,8 +190,12 @@ void PlotView::setFmPredemodDecimation(int m)
     fmPredemodDecim = m;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPredemodDecimation(m);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPredemodDecimation(m);
             }
         }
     }
@@ -364,14 +389,26 @@ void PlotView::addPlot(Plot *plot)
     if (plots.size() > 1) {
         plot->setPlotHeight(derivedPlotHeight);
     }
-    // Propagate the currently-configured FM settings to any newly added FM plot.
+    // Propagate the currently-configured FM settings to newly added FM/FSK plots.
     if (auto tp = dynamic_cast<TracePlot*>(plot)) {
         if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
             fd->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
             fd->setPostLpfCutoff(fmLpfCutoffHz);
             fd->setPostDecimation(fmDecim);
             fd->setPredemodDecimation(fmPredemodDecim);
+            fd->setCheapDemod(fmFastDemod);
         }
+        if (auto fsk = dynamic_cast<FskDemod*>(tp->source().get())) {
+            fsk->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
+            fsk->setPostLpfCutoff(fmLpfCutoffHz);
+            fsk->setPostDecimation(fmDecim);
+            fsk->setPredemodDecimation(fmPredemodDecim);
+            fsk->setCheapDemod(fmFastDemod);
+        }
+    }
+    if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
+        fskp->setReferenceCutoff(fmLpfCutoffHz);
+        fskp->setSelection(cursorsEnabled, selectedSamples);
     }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
@@ -709,6 +746,16 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         updateView(false);
 }
 
+
+void PlotView::updateFskPolarSelections()
+{
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSelection(cursorsEnabled, selectedSamples);
+        }
+    }
+}
+
 void PlotView::cursorsMoved()
 {
     selectedSamples = {
@@ -716,6 +763,7 @@ void PlotView::cursorsMoved()
         columnToSample(horizontalScrollBar()->value() + cursors.selection().maximum)
     };
 
+    updateFskPolarSelections();
     emitTimeSelection();
     viewport()->update();
 }
@@ -734,6 +782,8 @@ void PlotView::enableCursors(bool enabled)
         int margin = viewport()->rect().width() / 3;
         cursors.setSelection({viewport()->rect().left() + margin, viewport()->rect().right() - margin});
         cursorsMoved();
+    } else {
+        updateFskPolarSelections();
     }
     viewport()->update();
 }

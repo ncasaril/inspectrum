@@ -36,6 +36,8 @@ list(APPEND inspectrum_sources
     main.cpp
     fft.cpp
     frequencydemod.cpp
+    fskdemod.cpp
+    fskpolarplot.cpp
     mainwindow.cpp
     inputsource.cpp
     phasedemod.cpp
