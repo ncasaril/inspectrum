@@ -18,6 +18,11 @@
 namespace {
 constexpr int kCenterWindow = 1024;
 constexpr int kLevelWindow = 256;
+// Relative squelch: regions whose local deviation falls below this fraction of
+// the window's peak deviation are treated as gaps between bursts and faded, so
+// the AGC doesn't amplify their noise to full scale. Assumption-free (no
+// absolute-Hz threshold) and only bites when there's clear dynamic range.
+constexpr float kSquelchFrac = 0.08f;
 
 static void movingAverage(const std::vector<float> &in, std::vector<float> &out, int window)
 {
@@ -43,7 +48,13 @@ FskDemod::FskDemod(std::shared_ptr<SampleSource<std::complex<float>>> src)
 
 size_t FskDemod::historySize()
 {
-    return kCenterWindow;
+    // Warm BOTH cascaded moving averages. The level MA (kLevelWindow) reads
+    // absCentered values that each depend on a fully-ramped centre MA
+    // (kCenterWindow), so the first kept sample is only fully warmed after
+    // kCenterWindow + kLevelWindow lead-in samples. Discarding that much makes
+    // the output independent of where the render window's left edge falls
+    // (otherwise the leftmost ~kLevelWindow samples shift with the view).
+    return kCenterWindow + kLevelWindow;
 }
 
 void FskDemod::work(void *input, void *output, int count, size_t sampleid)
@@ -70,12 +81,29 @@ void FskDemod::work(void *input, void *output, int count, size_t sampleid)
     }
     movingAverage(absCentered, level, kLevelWindow);
 
+    // Peak deviation across the window, used as the squelch reference below.
+    float peakLevel = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        if (level[i] > peakLevel)
+            peakLevel = level[i];
+    }
+    const float squelchFloor = peakLevel * kSquelchFrac;
+
     for (int i = 0; i < count; ++i) {
         const float scale = std::max(level[i] * 2.0f, 1e-5f);
         float v = centered[i] / scale;
         if (!std::isfinite(v))
             v = 0.0f;
-        out[i] = std::max(-1.0f, std::min(1.0f, v));
+        v = std::max(-1.0f, std::min(1.0f, v));
+        // Relative squelch: the AGC normalises every region to full scale, so a
+        // quiet gap between bursts would otherwise read as full-scale noise.
+        // Fade regions whose deviation is far below the window peak (smooth t²
+        // ramp so a weak-but-real burst isn't hard-cut).
+        if (squelchFloor > 0.0f && level[i] < squelchFloor) {
+            const float t = level[i] / squelchFloor;
+            v *= t * t;
+        }
+        out[i] = v;
     }
 }
 
