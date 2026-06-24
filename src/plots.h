@@ -43,6 +43,7 @@ public:
     static Plot* fskPlot(std::shared_ptr<AbstractSampleSource> source);
     static Plot* fskPolarPlot(std::shared_ptr<AbstractSampleSource> source);
     static Plot* thresholdPlot(std::shared_ptr<AbstractSampleSource> source);
+    static Plot* histogramPlot(std::shared_ptr<AbstractSampleSource> source);
 
     static class _init
     {
@@ -55,6 +56,7 @@ public:
             plots.emplace(typeid(std::complex<float>), PlotInfo{"FSK polar plot", fskPolarPlot});
             plots.emplace(typeid(std::complex<float>), PlotInfo{"phase plot", phasePlot});
             plots.emplace(typeid(float), PlotInfo{"threshold plot", thresholdPlot});
+            plots.emplace(typeid(float), PlotInfo{"value histogram", histogramPlot});
         };
     } _initializer;
 };

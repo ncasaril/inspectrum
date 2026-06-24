@@ -177,7 +177,7 @@ private:
     QTimer *periodTimer = nullptr;
     bool   periodAnalysisEnabled = false;
     void analyzeVisiblePeriod();
-    void updateFskPolarSelections();
+    void updateSelectionPlots();
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir

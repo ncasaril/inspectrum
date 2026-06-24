@@ -22,6 +22,7 @@
 #include "frequencydemod.h"
 #include "fskdemod.h"
 #include "fskpolarplot.h"
+#include "histogramplot.h"
 #include "util.h"
 #include <QPixmapCache>
 #include <climits>
@@ -420,6 +421,9 @@ void PlotView::addPlot(Plot *plot)
         fskp->setSymbolRate(symbolRateHz);
         fskp->setSelection(cursorsEnabled, selectedSamples);
     }
+    if (auto hist = dynamic_cast<HistogramPlot*>(plot)) {
+        hist->setSelection(cursorsEnabled, selectedSamples);
+    }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
 
@@ -757,11 +761,16 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
 }
 
 
-void PlotView::updateFskPolarSelections()
+void PlotView::updateSelectionPlots()
 {
+    // Plots that summarise the cursor selection (or the visible range when
+    // cursors are off) rather than tracking time: keep their range in sync.
     for (auto &plt : plots) {
         if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
             fskp->setSelection(cursorsEnabled, selectedSamples);
+        }
+        if (auto hist = dynamic_cast<HistogramPlot*>(plt.get())) {
+            hist->setSelection(cursorsEnabled, selectedSamples);
         }
     }
 }
@@ -773,7 +782,7 @@ void PlotView::cursorsMoved()
         columnToSample(horizontalScrollBar()->value() + cursors.selection().maximum)
     };
 
-    updateFskPolarSelections();
+    updateSelectionPlots();
     emitTimeSelection();
     viewport()->update();
 }
@@ -793,7 +802,7 @@ void PlotView::enableCursors(bool enabled)
         cursors.setSelection({viewport()->rect().left() + margin, viewport()->rect().right() - margin});
         cursorsMoved();
     } else {
-        updateFskPolarSelections();
+        updateSelectionPlots();
     }
     viewport()->update();
 }
@@ -1367,7 +1376,7 @@ void PlotView::setCursorSegments(int segments)
 
     // Keep any FSK polar plot's selected range in sync — cursorsMoved() and
     // enableCursors() both do this, and resegmenting mutates selectedSamples too.
-    updateFskPolarSelections();
+    updateSelectionPlots();
     updateView();
     emitTimeSelection();
 }
