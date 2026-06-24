@@ -142,12 +142,17 @@ void MainWindow::openFile(QString fileName)
     // gqrx capture filename: gqrx_<YYYYMMDD>_<HHMMSS>_<centerfreqHz>_<sampleRateHz>_fc.raw
     // Example: gqrx_20260429_031912_251580000_10000000_fc.raw
     // Both fields are integer Hz, so a clean regex+toDouble round-trip works.
+    // The gqrx center frequency is applied *after* openFile() so the per-open
+    // frequency reset inside openFile() (which clears the previous file's
+    // center) doesn't clobber it. Sample rate is safe to set first — openFile
+    // only overwrites it from container metadata, which gqrx .raw lacks.
+    double pendingCenterHz = 0.0;
     QRegExp gqrxRx("gqrx_\\d{8}_\\d{6}_(\\d+)_(\\d+)_fc\\.raw");
     if (gqrxRx.exactMatch(basename)) {
         bool ok = false;
         double centerHz = gqrxRx.cap(1).toDouble(&ok);
         if (ok && centerHz > 0.0) {
-            input->setCenterFrequency(centerHz);
+            pendingCenterHz = centerHz;
         }
         double rateHz = gqrxRx.cap(2).toDouble(&ok);
         if (ok && rateHz > 0.0) {
@@ -158,6 +163,9 @@ void MainWindow::openFile(QString fileName)
     try
     {
         input->openFile(fileName.toUtf8().constData());
+        if (pendingCenterHz > 0.0) {
+            input->setCenterFrequency(pendingCenterHz);
+        }
     }
     catch (const std::exception &ex)
     {

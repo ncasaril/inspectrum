@@ -74,7 +74,10 @@ private:
     // tarball bundling a .sigmf-meta + .sigmf-data, optionally produced by
     // decompressing a .sigmf.zst). The data is read in place at its byte
     // offset within the archive, so no separate extraction copy is made.
-    void openSigmfArchive(const uchar *data, qint64 size);
+    // Returns true if it was a SigMF archive and the fields were populated;
+    // false if it carried no .sigmf-meta/.sigmf-data (so the caller can fall
+    // back, e.g. open a plain `.tar` as raw IQ).
+    bool openSigmfArchive(const uchar *data, qint64 size);
 
 public:
     InputSource();

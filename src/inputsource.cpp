@@ -276,6 +276,15 @@ static std::vector<TarEntry> parseTar(const uchar *data, qint64 totalSize)
         char typeflag = hdr[156];
 
         qint64 dataStart = pos + 512;
+        // Bound the payload against the actual mapping. A truncated or hostile
+        // tar can carry a size field that runs past the mmap, and the
+        // downstream QByteArray / copyRange reads would then walk off the
+        // mapping (SIGSEGV/SIGBUS). dataStart <= totalSize already (loop
+        // guard), so this is the overflow-safe form. Stop parsing on a bad
+        // size — once the framing is wrong the rest of the stream can't be
+        // trusted anyway.
+        if (sz < 0 || sz > totalSize - dataStart)
+            break;
         // Only regular files ('0' in ustar, '\0' in very old tar) carry data
         // we care about; skip directories, links, etc.
         if (typeflag == '0' || typeflag == '\0') {
@@ -626,7 +635,7 @@ void InputSource::openIqTar(const uchar *data, qint64 size)
     frequency = centerFreq;
 }
 
-void InputSource::openSigmfArchive(const uchar *data, qint64 size)
+bool InputSource::openSigmfArchive(const uchar *data, qint64 size)
 {
     auto entries = parseTar(data, size);
 
@@ -636,10 +645,12 @@ void InputSource::openSigmfArchive(const uchar *data, qint64 size)
         if (e.name.endsWith(".sigmf-meta", Qt::CaseInsensitive)) metaEntry = &e;
         else if (e.name.endsWith(".sigmf-data", Qt::CaseInsensitive)) dataEntry = &e;
     }
-    if (!metaEntry)
-        throw std::runtime_error("sigmf archive: no .sigmf-meta found in archive");
-    if (!dataEntry)
-        throw std::runtime_error("sigmf archive: no .sigmf-data found in archive");
+    // Not a SigMF archive (no meta/data members). Report that rather than
+    // throwing so the caller can fall back — e.g. a plain `.tar` then opens
+    // as raw IQ instead of failing. A genuinely malformed `.sigmf` is the
+    // caller's error to raise.
+    if (!metaEntry || !dataEntry)
+        return false;
 
     QByteArray metaBytes(reinterpret_cast<const char*>(data + metaEntry->dataOffset),
                          static_cast<int>(metaEntry->size));
@@ -649,6 +660,7 @@ void InputSource::openSigmfArchive(const uchar *data, qint64 size)
 
     dataOffset = static_cast<size_t>(dataEntry->dataOffset);
     sampleCount = dataEntry->size / sampleAdapter->sampleSize();
+    return true;
 }
 
 void InputSource::openFile(const char *filename)
@@ -658,6 +670,12 @@ void InputSource::openFile(const char *filename)
     _wasSigmfInput = false;
     _originalSigmfRoot = QJsonObject();
     _annotationsDirty = false;
+    // Reset the center frequency for each open. Container metadata (SigMF,
+    // iq.tar) raises it again below when present; filename-derived values
+    // (gqrx/osmocom) are applied by MainWindow *after* openFile() returns.
+    // Without this reset a baseband file opened after a frequency-tagged one
+    // would inherit the previous file's center and mislabel the abs-freq axis.
+    frequency = 0.0;
     std::string suffix = std::string(fileInfo.suffix().toLower().toUtf8().constData());
     if (_fmt != "") { suffix = _fmt; } // allow fmt override
 
@@ -799,18 +817,30 @@ void InputSource::openFile(const char *filename)
 
         annotationList.clear();
         dataOffset = 0;
+        bool handled = false;
         try {
-            openSigmfArchive(data, archiveSize);
+            handled = openSigmfArchive(data, archiveSize);
         } catch (...) {
             file->unmap(data);
             throw;
         }
 
-        cleanup();
-        inputFile = file.release();
-        mmapData = data;
-        invalidate();
-        return;
+        if (handled) {
+            cleanup();
+            inputFile = file.release();
+            mmapData = data;
+            invalidate();
+            return;
+        }
+
+        // The archive carried no .sigmf-meta/.sigmf-data. Drop the mapping;
+        // for a plain `.tar` fall through to the raw path (preserving the
+        // pre-existing "open as raw IQ" behavior), but a `.sigmf` that isn't
+        // a valid archive is a hard error.
+        file->unmap(data);
+        if (suffix != "tar")
+            throw std::runtime_error("sigmf archive: no .sigmf-meta/.sigmf-data found in archive");
+        dataFilename = filename;
     }
     else {
         dataFilename = filename;
