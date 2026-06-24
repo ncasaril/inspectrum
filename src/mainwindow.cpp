@@ -74,6 +74,8 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmLpfMethodChanged, plots, &PlotView::setFmLpfMethod);
     connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
+    // Symbol rate (Bd) for the FSK polar plot's differential delay.
+    connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
     // Auto-tune button: dock asks PlotView, PlotView picks values and applies
     // them, then echoes them back so the dock widgets reflect the new state.
     connect(dock, &SpectrogramControls::autoLpfRequested, plots, &PlotView::autoTuneFmLpf);

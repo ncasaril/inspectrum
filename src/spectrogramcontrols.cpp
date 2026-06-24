@@ -308,6 +308,39 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     connect(fmAutoLpfButton, &QPushButton::clicked,
             this, &SpectrogramControls::autoLpfRequested);
 
+    // Symbol rate (baud) for the FSK polar plot's differential delay. The
+    // delay is round(Fs / baud) ≈ one symbol period — the delay at which a
+    // differential constellation collapses to clusters. 0 = unset (the polar
+    // plot hides the scatter and prompts instead of drawing a meaningless
+    // smear). Decoupled from the FM LPF cutoff on purpose.
+    symbolRateLineEdit = new QLineEdit(widget);
+    auto symbolRateValidator = new QDoubleValidator(0.0, 1e9, 3, this);
+    symbolRateLineEdit->setValidator(symbolRateValidator);
+    symbolRateLineEdit->setText("0");
+    symbolRateLineEdit->setToolTip(tr(
+        "Symbol rate (baud) for the FSK polar plot. Sets the differential "
+        "delay to one symbol period; 0 hides the constellation."));
+    layout->addRow(new QLabel(tr("Symbol rate (Bd):")), symbolRateLineEdit);
+    connect(symbolRateLineEdit, &QLineEdit::editingFinished, this, [this]() {
+        bool ok;
+        double baud = symbolRateLineEdit->text().toDouble(&ok);
+        if (ok) emit symbolRateChanged(baud);
+    });
+    // Copy the baud measured by the cursor selection (Symbols ÷ selection
+    // length) into the field and apply it — the manual "estimate" path.
+    useMeasuredBaudButton = new QPushButton(tr("Use measured baud"), widget);
+    useMeasuredBaudButton->setToolTip(tr(
+        "Copy the symbol rate measured by the cursor selection into the field "
+        "above. Set Symbols to the number of symbols spanned, drag the cursors "
+        "across them, then click."));
+    layout->addRow(useMeasuredBaudButton);
+    connect(useMeasuredBaudButton, &QPushButton::clicked, this, [this]() {
+        if (lastMeasuredSymbolRate_ > 0.0) {
+            symbolRateLineEdit->setText(QString::number(lastMeasuredSymbolRate_, 'f', 3));
+            emit symbolRateChanged(lastMeasuredSymbolRate_);
+        }
+    });
+
     widget->setLayout(layout);
     setWidget(widget);
 
@@ -445,6 +478,9 @@ void SpectrogramControls::timeSelectionChanged(float time)
         rateLabel->setText(QString::fromStdString(formatSIValue(1 / time)) + "Hz");
 
         int symbols = cursorSymbolsSpinBox->value();
+        // Remember the raw baud so "Use measured baud" can push it to the FSK
+        // polar plot without re-parsing the SI-formatted label text.
+        lastMeasuredSymbolRate_ = (time > 0.0f) ? (symbols / time) : 0.0;
         symbolPeriodLabel->setText(QString::fromStdString(formatSIValue(time / symbols)) + "s");
         symbolRateLabel->setText(QString::fromStdString(formatSIValue(symbols / time)) + "Bd");
     }

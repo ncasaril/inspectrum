@@ -135,13 +135,23 @@ void PlotView::setFmLpfCutoff(double hz)
                 fsk->setPostLpfCutoff(hz);
             }
         }
-        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
-            fskp->setReferenceCutoff(hz);
-        }
     }
     QPixmapCache::clear();
     viewport()->update();
     if (periodTimer) periodTimer->start();
+}
+
+// Symbol rate (baud) for the differential constellation. Kept separate from
+// the FM LPF cutoff: the polar delay is a symbol-period quantity, not a filter
+// bandwidth, and conflating them reshaped the FM trace as a side effect.
+void PlotView::setSymbolRate(double baud)
+{
+    symbolRateHz = baud;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSymbolRate(baud);
+        }
+    }
 }
 
 void PlotView::setFmDecimation(int n)
@@ -407,7 +417,7 @@ void PlotView::addPlot(Plot *plot)
         }
     }
     if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
-        fskp->setReferenceCutoff(fmLpfCutoffHz);
+        fskp->setSymbolRate(symbolRateHz);
         fskp->setSelection(cursorsEnabled, selectedSamples);
     }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
@@ -1355,6 +1365,9 @@ void PlotView::setCursorSegments(int segments)
 
     cursors.setSegments(segments);
 
+    // Keep any FSK polar plot's selected range in sync — cursorsMoved() and
+    // enableCursors() both do this, and resegmenting mutates selectedSamples too.
+    updateFskPolarSelections();
     updateView();
     emitTimeSelection();
 }
