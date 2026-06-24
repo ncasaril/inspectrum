@@ -196,6 +196,19 @@ void FrequencyDemod::setPredemodDecimation(int m)
     invalidate();
 }
 
+void FrequencyDemod::setAmplitudeSquelch(double frac)
+{
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+    {
+        QMutexLocker ml(&mutex);
+        if (frac == squelchFrac_) return;
+        squelchFrac_ = frac;
+    }
+    invalidateBatchCache();
+    invalidate();
+}
+
 void FrequencyDemod::destroyPostLpf()
 {
     if (postFir_) { firfilt_rrrf_destroy(postFir_); postFir_ = nullptr; }
@@ -394,6 +407,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     size_t    settle;
     bool      cheap;
     int       decim;
+    double    squelch;
     {
         QMutexLocker ml(&mutex);
         method   = postLpfMethod_;
@@ -402,6 +416,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
         settle   = lpfSettleSamples_ ? lpfSettleSamples_ : 4096;
         cheap    = cheapMode_;
         decim    = predemodDecim_;
+        squelch  = squelchFrac_;
     }
     if (decim < 1) decim = 1;
 
@@ -596,6 +611,23 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
         for (auto &s : demod) s *= scalef;
     }
 
+    // Amplitude squelch (see work()): blank FM output where |IQ| is below
+    // squelch · window-peak. rawIq is the full-rate IQ, aligned 1:1 with the
+    // (hold-expanded) demod buffer.
+    if (squelch > 0.0 && batchLen > 0) {
+        const std::complex<float> *iqFull = rawIq.get();
+        float peak = 0.0f;
+        for (size_t i = 0; i < batchLen; ++i) {
+            const float a = std::abs(iqFull[i]);
+            if (a > peak) peak = a;
+        }
+        const float thr = peak * static_cast<float>(squelch);
+        for (size_t i = 0; i < batchLen; ++i) {
+            if (std::abs(iqFull[i]) < thr)
+                demod[i] = std::numeric_limits<float>::quiet_NaN();
+        }
+    }
+
     // Small absolute file-start NaN mask for the upstream tuner's FIR
     // cold-start. The bilateral pad above handles *our* LPF, but the
     // tuner runs at full Fs upstream and its output samples [0..tuner_taps]
@@ -763,6 +795,24 @@ void FrequencyDemod::work(void *input, void *output, int count, size_t sampleid)
                 : (0.49 * r);
             const float scalef = static_cast<float>(scale);
             for (int i = 0; i < count; ++i) out[i] *= scalef;
+        }
+    }
+
+    // Amplitude squelch: blank (NaN) the FM output where the carrier amplitude
+    // |IQ| is below squelchFrac_ · window-peak, so noise in the gaps between
+    // bursts — where the discriminator output is large and wild — doesn't
+    // dominate the autoscale or the trace. NaN is skipped by the min/max scan
+    // and breaks the rendered trace into gaps.
+    if (squelchFrac_ > 0.0 && count > 0) {
+        float peak = 0.0f;
+        for (int i = 0; i < count; ++i) {
+            const float a = std::abs(in[i]);
+            if (a > peak) peak = a;
+        }
+        const float thr = peak * static_cast<float>(squelchFrac_);
+        for (int i = 0; i < count; ++i) {
+            if (std::abs(in[i]) < thr)
+                out[i] = std::numeric_limits<float>::quiet_NaN();
         }
     }
 

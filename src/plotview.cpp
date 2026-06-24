@@ -20,6 +20,9 @@
 #include "plotview.h"
 #include "annotationdialog.h"
 #include "frequencydemod.h"
+#include "fskdemod.h"
+#include "fskpolarplot.h"
+#include "histogramplot.h"
 #include "util.h"
 #include <QPixmapCache>
 #include <climits>
@@ -95,6 +98,7 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
 
 void PlotView::enableFastDemod(bool enabled)
 {
+    fmFastDemod = enabled;
     // clear any cached trace tiles so new demod data is used
     QPixmapCache::clear();
     // walk all derived TracePlot instances and update their demod mode
@@ -103,6 +107,9 @@ void PlotView::enableFastDemod(bool enabled)
             auto src = tp->source();
             if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setCheapDemod(enabled);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setCheapDemod(enabled);
             }
         }
     }
@@ -121,8 +128,12 @@ void PlotView::setFmLpfCutoff(double hz)
     fmLpfCutoffHz = hz;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostLpfCutoff(hz);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostLpfCutoff(hz);
             }
         }
     }
@@ -131,14 +142,53 @@ void PlotView::setFmLpfCutoff(double hz)
     if (periodTimer) periodTimer->start();
 }
 
+// Symbol rate (baud) for the differential constellation. Kept separate from
+// the FM LPF cutoff: the polar delay is a symbol-period quantity, not a filter
+// bandwidth, and conflating them reshaped the FM trace as a side effect.
+void PlotView::setSymbolRate(double baud)
+{
+    symbolRateHz = baud;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSymbolRate(baud);
+        }
+    }
+}
+
+// Signal-strength gate (% of window peak) for the FSK polar plot's scope.
+void PlotView::setConstellationGate(int pct)
+{
+    constellationGatePct = pct;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setLevelGate(pct);
+        }
+    }
+}
+
+// Toggle symbol-timed (1 point/symbol) vs full-rate constellation rendering.
+void PlotView::setConstellationSymbolTimed(bool on)
+{
+    constellationSymbolTimed = on;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSymbolTimed(on);
+        }
+    }
+}
+
 void PlotView::setFmDecimation(int n)
 {
     if (n < 1) n = 1;
     fmDecim = n;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostDecimation(n);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostDecimation(n);
             }
         }
     }
@@ -153,8 +203,12 @@ void PlotView::setFmLpfMethod(int method)
     auto m = static_cast<FrequencyDemod::LpfMethod>(method);
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPostLpfMethod(m);
+            }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPostLpfMethod(m);
             }
         }
     }
@@ -169,9 +223,29 @@ void PlotView::setFmPredemodDecimation(int m)
     fmPredemodDecim = m;
     for (auto &plt : plots) {
         if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
-            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
+            auto src = tp->source();
+            if (auto fd = dynamic_cast<FrequencyDemod*>(src.get())) {
                 fd->setPredemodDecimation(m);
             }
+            if (auto fsk = dynamic_cast<FskDemod*>(src.get())) {
+                fsk->setPredemodDecimation(m);
+            }
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+    if (periodTimer) periodTimer->start();
+}
+
+// Amplitude squelch (% of window-peak |IQ|) for every FM plot. Blanks the
+// discriminator output in the noise gaps so it stops dominating the autoscale.
+void PlotView::setFmSquelch(int pct)
+{
+    fmSquelchPct = pct;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get()))
+                fd->setAmplitudeSquelch(pct / 100.0);
         }
     }
     QPixmapCache::clear();
@@ -364,14 +438,32 @@ void PlotView::addPlot(Plot *plot)
     if (plots.size() > 1) {
         plot->setPlotHeight(derivedPlotHeight);
     }
-    // Propagate the currently-configured FM settings to any newly added FM plot.
+    // Propagate the currently-configured FM settings to newly added FM/FSK plots.
     if (auto tp = dynamic_cast<TracePlot*>(plot)) {
         if (auto fd = dynamic_cast<FrequencyDemod*>(tp->source().get())) {
             fd->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
             fd->setPostLpfCutoff(fmLpfCutoffHz);
             fd->setPostDecimation(fmDecim);
             fd->setPredemodDecimation(fmPredemodDecim);
+            fd->setCheapDemod(fmFastDemod);
+            fd->setAmplitudeSquelch(fmSquelchPct / 100.0);
         }
+        if (auto fsk = dynamic_cast<FskDemod*>(tp->source().get())) {
+            fsk->setPostLpfMethod(static_cast<FrequencyDemod::LpfMethod>(fmLpfMethod));
+            fsk->setPostLpfCutoff(fmLpfCutoffHz);
+            fsk->setPostDecimation(fmDecim);
+            fsk->setPredemodDecimation(fmPredemodDecim);
+            fsk->setCheapDemod(fmFastDemod);
+        }
+    }
+    if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
+        fskp->setSymbolRate(symbolRateHz);
+        fskp->setLevelGate(constellationGatePct);
+        fskp->setSymbolTimed(constellationSymbolTimed);
+        fskp->setSelection(cursorsEnabled, selectedSamples);
+    }
+    if (auto hist = dynamic_cast<HistogramPlot*>(plot)) {
+        hist->setSelection(cursorsEnabled, selectedSamples);
     }
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
@@ -709,6 +801,21 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         updateView(false);
 }
 
+
+void PlotView::updateSelectionPlots()
+{
+    // Plots that summarise the cursor selection (or the visible range when
+    // cursors are off) rather than tracking time: keep their range in sync.
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSelection(cursorsEnabled, selectedSamples);
+        }
+        if (auto hist = dynamic_cast<HistogramPlot*>(plt.get())) {
+            hist->setSelection(cursorsEnabled, selectedSamples);
+        }
+    }
+}
+
 void PlotView::cursorsMoved()
 {
     selectedSamples = {
@@ -716,6 +823,7 @@ void PlotView::cursorsMoved()
         columnToSample(horizontalScrollBar()->value() + cursors.selection().maximum)
     };
 
+    updateSelectionPlots();
     emitTimeSelection();
     viewport()->update();
 }
@@ -734,6 +842,8 @@ void PlotView::enableCursors(bool enabled)
         int margin = viewport()->rect().width() / 3;
         cursors.setSelection({viewport()->rect().left() + margin, viewport()->rect().right() - margin});
         cursorsMoved();
+    } else {
+        updateSelectionPlots();
     }
     viewport()->update();
 }
@@ -1305,6 +1415,9 @@ void PlotView::setCursorSegments(int segments)
 
     cursors.setSegments(segments);
 
+    // Keep any FSK polar plot's selected range in sync — cursorsMoved() and
+    // enableCursors() both do this, and resegmenting mutates selectedSamples too.
+    updateSelectionPlots();
     updateView();
     emitTimeSelection();
 }

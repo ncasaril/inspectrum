@@ -93,6 +93,14 @@ public slots:
     void setFmDecimation(int n);
     // Pre-demod IQ decimation factor (1 = off).
     void setFmPredemodDecimation(int m);
+    // Amplitude squelch (% of window-peak |IQ|) for every FM plot. 0 = off.
+    void setFmSquelch(int pct);
+    // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
+    void setSymbolRate(double baud);
+    // Signal-strength gate (% of window peak) for the FSK polar constellation.
+    void setConstellationGate(int pct);
+    // Symbol-timed (1 point/symbol) vs full-rate FSK polar constellation.
+    void setConstellationSymbolTimed(bool on);
     // Pick reasonable LPF cutoff, predemod M, and post N from the current
     // sample rate and tuner bandwidth. Applies them and emits
     // fmAutoLpfComputed() so the dock widgets can mirror.
@@ -175,11 +183,20 @@ private:
     QTimer *periodTimer = nullptr;
     bool   periodAnalysisEnabled = false;
     void analyzeVisiblePeriod();
+    void updateSelectionPlots();
     // Latest-applied FM post-demod settings; re-applied when new FM plots are added.
     double fmLpfCutoffHz = 0.0;
     int    fmLpfMethod = 0; // FrequencyDemod::LpfMethod::KaiserFir
     int    fmDecim = 1;
     int    fmPredemodDecim = 1;
+    bool   fmFastDemod = false;
+    int    fmSquelchPct = 0; // amplitude squelch (% of window-peak |IQ|), 0 = off
+    // Symbol rate (baud) re-applied to FSK polar plots as they're added. 0 = unset.
+    double symbolRateHz = 0.0;
+    // Constellation signal-strength gate (% of window peak), re-applied likewise.
+    int    constellationGatePct = 15;
+    // Symbol-timed constellation rendering, re-applied to new FSK polar plots.
+    bool   constellationSymbolTimed = true;
     // Shift+left-drag annotation rubber-banding on the spectrogram. The
     // rectangle is in viewport coords; on release we map x→sample range and
     // y→absolute Hz range, then open AnnotationDialog.

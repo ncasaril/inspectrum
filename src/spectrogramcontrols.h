@@ -56,6 +56,14 @@ signals:
     // Pre-demod IQ decimation factor (1 = off). When set the FM demod
     // chain runs at Fs/M (IQEngine pattern).
     void fmPredemodDecimChanged(int m);
+    // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
+    void symbolRateChanged(double baud);
+    // Amplitude squelch (% of window-peak |IQ|) for FM plots. 0 = off.
+    void fmSquelchChanged(int pct);
+    // Signal-strength gate (% of window peak) for the FSK polar constellation.
+    void constellationGateChanged(int pct);
+    // Symbol-timed (1 point/symbol) vs full-rate FSK polar constellation.
+    void constellationSymbolTimedChanged(bool on);
     // User clicked "Auto-tune FM LPF" — PlotView picks values from the
     // current Fs / tuner bandwidth, applies them, then echoes them back
     // to applyAutoLpf so the dock widgets stay in sync.
@@ -109,6 +117,9 @@ private:
     QFormLayout *layout;
     void clearCursorLabels();
     void fftOrZoomChanged(void);
+    // Last symbol rate (Bd) measured from the cursor selection; copied into
+    // symbolRateLineEdit by the "Use measured baud" button.
+    double lastMeasuredSymbolRate_ = 0.0;
 
 public:
     QPushButton *fileOpenButton;
@@ -165,8 +176,18 @@ public:
     QSpinBox   *fmDecimSpinBox;
     // FM pre-demod IQ decimation (1 disables)
     QSpinBox   *fmPredemodDecimSpinBox;
+    // FM amplitude squelch (% of window-peak |IQ|; 0 disables)
+    QSpinBox   *fmSquelchSpinBox;
     // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
     QPushButton *fmAutoLpfButton;
+    // Symbol rate (Bd) for the FSK polar plot, plus a button that copies the
+    // cursor-measured baud into it.
+    QLineEdit   *symbolRateLineEdit;
+    QPushButton *useMeasuredBaudButton;
+    // Signal-strength gate (%) for the FSK polar constellation.
+    QSpinBox    *constellationGateSpinBox;
+    // Symbol-timed (1 point/symbol) FSK polar constellation toggle.
+    QCheckBox   *constellationSymbolTimedCheckBox;
     // Save annotations to a .sigmf-meta sidecar. Shown disabled when the
     // annotation list hasn't been mutated since the last load/save.
     QPushButton *saveAnnotationsButton;

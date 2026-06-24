@@ -44,6 +44,12 @@ public:
     void invalidateEvent();
     virtual std::unique_ptr<Tout[]> getSamples(size_t start, size_t length);
     virtual void work(void *input, void *output, int count, size_t sampleid) = 0;
+    // Override to return true when work() carries no mutable per-instance state
+    // (only locals + its own parameter snapshot). getSamples() then runs it
+    // WITHOUT taking `mutex`, so many tile workers can transform the same shared
+    // node concurrently instead of serialising on it. Default false (safe):
+    // stateful nodes like FrequencyDemod keep the lock.
+    virtual bool workIsReentrant() { return false; }
     virtual size_t count() {
         return src->count();
     };

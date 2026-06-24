@@ -74,6 +74,14 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmLpfMethodChanged, plots, &PlotView::setFmLpfMethod);
     connect(dock, &SpectrogramControls::fmDecimChanged, plots, &PlotView::setFmDecimation);
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
+    // FM amplitude squelch (% of window-peak |IQ|).
+    connect(dock, &SpectrogramControls::fmSquelchChanged, plots, &PlotView::setFmSquelch);
+    // Symbol rate (Bd) for the FSK polar plot's differential delay.
+    connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
+    // Signal-strength gate (%) for the FSK polar constellation.
+    connect(dock, &SpectrogramControls::constellationGateChanged, plots, &PlotView::setConstellationGate);
+    // Symbol-timed (1 point/symbol) FSK polar constellation toggle.
+    connect(dock, &SpectrogramControls::constellationSymbolTimedChanged, plots, &PlotView::setConstellationSymbolTimed);
     // Auto-tune button: dock asks PlotView, PlotView picks values and applies
     // them, then echoes them back so the dock widgets reflect the new state.
     connect(dock, &SpectrogramControls::autoLpfRequested, plots, &PlotView::autoTuneFmLpf);
@@ -142,12 +150,17 @@ void MainWindow::openFile(QString fileName)
     // gqrx capture filename: gqrx_<YYYYMMDD>_<HHMMSS>_<centerfreqHz>_<sampleRateHz>_fc.raw
     // Example: gqrx_20260429_031912_251580000_10000000_fc.raw
     // Both fields are integer Hz, so a clean regex+toDouble round-trip works.
+    // The gqrx center frequency is applied *after* openFile() so the per-open
+    // frequency reset inside openFile() (which clears the previous file's
+    // center) doesn't clobber it. Sample rate is safe to set first — openFile
+    // only overwrites it from container metadata, which gqrx .raw lacks.
+    double pendingCenterHz = 0.0;
     QRegExp gqrxRx("gqrx_\\d{8}_\\d{6}_(\\d+)_(\\d+)_fc\\.raw");
     if (gqrxRx.exactMatch(basename)) {
         bool ok = false;
         double centerHz = gqrxRx.cap(1).toDouble(&ok);
         if (ok && centerHz > 0.0) {
-            input->setCenterFrequency(centerHz);
+            pendingCenterHz = centerHz;
         }
         double rateHz = gqrxRx.cap(2).toDouble(&ok);
         if (ok && rateHz > 0.0) {
@@ -158,6 +171,9 @@ void MainWindow::openFile(QString fileName)
     try
     {
         input->openFile(fileName.toUtf8().constData());
+        if (pendingCenterHz > 0.0) {
+            input->setCenterFrequency(pendingCenterHz);
+        }
     }
     catch (const std::exception &ex)
     {

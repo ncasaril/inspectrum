@@ -645,7 +645,10 @@ static QImage renderFloatTrace(SampleSource<float> *src,
     const size_t decim = (len > size_t(w)) ? (len + w - 1) / w : 1;
     auto addPoint = [&](size_t i, double xCoord) {
         double s = samples[i];
-        if (!std::isfinite(s)) return;
+        // Break the path at a non-finite sample (squelch / cold-start gap) so
+        // the next finite point starts a fresh subpath instead of bridging the
+        // gap with a straight line.
+        if (!std::isfinite(s)) { first = true; return; }
         double norm = (s - mid) * invRange;
         if (norm >  1.0) norm =  1.0;
         if (norm < -1.0) norm = -1.0;

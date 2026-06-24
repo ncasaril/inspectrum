@@ -43,11 +43,19 @@ std::unique_ptr<Tout[]> SampleBuffer<Tin, Tout>::getSamples(size_t start, size_t
 
     auto temp = std::make_unique<Tout[]>(history + length);
     auto dest = std::make_unique<Tout[]>(length);
-    QMutexLocker ml(&mutex);
     // Pass the sampleid of the buffer's first sample (start - history), not of
     // the returned output, so NCO-based transforms like TunerTransform can set
     // their phase consistently with what they actually mix.
-    work(samples.get(), temp.get(), history + length, start - history);
+    //
+    // Reentrant nodes (stateless work()) run lock-free so concurrent tile
+    // workers transforming the same shared node don't serialise on `mutex`;
+    // stateful nodes (FrequencyDemod, ...) keep the lock.
+    if (workIsReentrant()) {
+        work(samples.get(), temp.get(), history + length, start - history);
+    } else {
+        QMutexLocker ml(&mutex);
+        work(samples.get(), temp.get(), history + length, start - history);
+    }
     memcpy(dest.get(), temp.get() + history, length * sizeof(Tout));
     return dest;
 }

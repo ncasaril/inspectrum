@@ -91,6 +91,41 @@ void SpectrogramPlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t>
         paintAnnotations(painter, rect, sampleRange);
 }
 
+static QString formatFrequencyLabel(double hz, bool signedBaseband)
+{
+    const double absHz = fabs(hz);
+    double value = hz;
+    QString unit = QStringLiteral("Hz");
+    int precision = 0;
+
+    if (absHz >= 1000000000.0) {
+        value = hz / 1000000000.0;
+        unit = QStringLiteral("GHz");
+        precision = 6;
+    } else if (absHz >= 1000000.0) {
+        value = hz / 1000000.0;
+        unit = QStringLiteral("MHz");
+        precision = 6;
+    } else if (absHz >= 1000.0) {
+        value = hz / 1000.0;
+        unit = QStringLiteral("kHz");
+        precision = 3;
+    }
+
+    QString number = QString::number(value, 'f', precision);
+    if (precision > 0) {
+        while (number.endsWith('0'))
+            number.chop(1);
+        if (number.endsWith('.'))
+            number.chop(1);
+    }
+
+    if (signedBaseband && hz > 0.0)
+        number.prepend(' ');
+
+    return number + QStringLiteral(" ") + unit;
+}
+
 void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
 {
     if (sampleRate == 0) {
@@ -101,7 +136,6 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
         return;
     }
 
-    // At which pixel is F_+sampleRate/2
     int y = rect.y();
 
     int plotHeight = rect.height();
@@ -121,8 +155,9 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
 
     QPen pen(Qt::white, 1, Qt::SolidLine);
     painter.setPen(pen);
-    QFontMetrics fm(painter.font());
 
+    const double centreFrequency = inputSource->getFrequency();
+    const bool showAbsoluteFrequency = centreFrequency != 0.0;
 
     uint64_t tick = 0;
 
@@ -136,23 +171,13 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
         painter.drawLine(0, tickpy, 30, tickpy);
 
         if (tick != 0) {
-            char buf[128];
-
-            if (bwPerTick % 1000000000 == 0) {
-                snprintf(buf, sizeof(buf), "-%lu GHz", tick / 1000000000);
-            } else if (bwPerTick % 1000000 == 0) {
-                snprintf(buf, sizeof(buf), "-%lu MHz", tick / 1000000);
-            } else if(bwPerTick % 1000 == 0) {
-                snprintf(buf, sizeof(buf), "-%lu kHz", tick / 1000);
-            } else {
-                snprintf(buf, sizeof(buf), "-%lu Hz", tick);
-            }
+            const double upperHz = showAbsoluteFrequency ? centreFrequency + tick : (double)tick;
+            const double lowerHz = showAbsoluteFrequency ? centreFrequency - tick : -(double)tick;
 
             if (!inputSource->realSignal())
-                painter.drawText(5, tickny - 5, buf);
+                painter.drawText(5, tickny - 5, formatFrequencyLabel(lowerHz, !showAbsoluteFrequency));
 
-            buf[0] = ' ';
-            painter.drawText(5, tickpy + 15, buf);
+            painter.drawText(5, tickpy + 15, formatFrequencyLabel(upperHz, !showAbsoluteFrequency));
         }
 
         tick += bwPerTick;
