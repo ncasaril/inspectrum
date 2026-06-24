@@ -78,6 +78,8 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
     // Signal-strength gate (%) for the FSK polar constellation.
     connect(dock, &SpectrogramControls::constellationGateChanged, plots, &PlotView::setConstellationGate);
+    // Symbol-timed (1 point/symbol) FSK polar constellation toggle.
+    connect(dock, &SpectrogramControls::constellationSymbolTimedChanged, plots, &PlotView::setConstellationSymbolTimed);
     // Auto-tune button: dock asks PlotView, PlotView picks values and applies
     // them, then echoes them back so the dock widgets reflect the new state.
     connect(dock, &SpectrogramControls::autoLpfRequested, plots, &PlotView::autoTuneFmLpf);

@@ -48,33 +48,77 @@ static QImage renderConstellation(std::shared_ptr<SampleSource<std::complex<floa
     const double cx = k.w / 2.0;
     const double cy = k.h / 2.0;
 
-    // Pass 1: window reference = peak differential magnitude |s[i]|·|s[i-delay]|.
-    // In-burst samples cluster near this; noise/gaps sit far below it.
+    // Build the differential points to plot.
+    std::vector<std::complex<float>> dv;
+    if (k.symbolTimed && k.sps >= 2.0) {
+        // Symbol-timed: resample to one sample per symbol at fractional spacing
+        // k.sps (linear interp), at the timing phase that maximises symbol
+        // energy, then take the 1-symbol differential. This collapses the
+        // inter-symbol trajectory "spokes" so only the decision-point clusters
+        // remain (e.g. the 4 points of π/4-DQPSK).
+        const size_t M = static_cast<size_t>(k.len / k.sps);
+        if (M < 4)
+            return img;
+        auto interp = [&](double pos) -> std::complex<float> {
+            if (pos < 0.0) pos = 0.0;
+            const size_t i0 = static_cast<size_t>(pos);
+            if (i0 + 1 >= k.len) return samples[k.len - 1];
+            const float f = static_cast<float>(pos - i0);
+            return samples[i0] * (1.0f - f) + samples[i0 + 1] * f;
+        };
+        // Timing recovery: pick the fractional phase maximising mean symbol
+        // energy (symbol centres are the energy peaks for pulse-shaped signals;
+        // for constant-envelope FSK any phase is equivalent, so it's a no-op).
+        double bestPhase = 0.0, bestScore = -1.0;
+        for (int p = 0; p < 16; ++p) {
+            const double ph = p / 16.0;
+            double e = 0.0; size_t cnt = 0;
+            for (size_t s = 0; s < M; s += 4) {
+                const double pos = (s + ph) * k.sps;
+                if (pos >= k.len) break;
+                e += std::norm(interp(pos)); ++cnt;
+            }
+            if (cnt && e / cnt > bestScore) { bestScore = e / cnt; bestPhase = ph; }
+        }
+        std::vector<std::complex<float>> sym;
+        sym.reserve(M);
+        for (size_t s = 0; s < M; ++s) {
+            const double pos = (s + bestPhase) * k.sps;
+            if (pos >= k.len) break;
+            sym.push_back(interp(pos));
+        }
+        dv.reserve(sym.size());
+        for (size_t s = 1; s < sym.size(); ++s)
+            dv.push_back(sym[s] * std::conj(sym[s - 1]));
+    } else {
+        // Full-rate: every sample's 1-symbol-delayed differential (the
+        // trajectory, including inter-symbol transitions). k.len is capped at
+        // kMaxSamples so this is a bounded (≤500k) loop.
+        dv.reserve(k.len - k.delay);
+        for (size_t i = k.delay; i < k.len; ++i)
+            dv.push_back(samples[i] * std::conj(samples[i - k.delay]));
+    }
+    if (dv.empty())
+        return img;
+
+    // Window reference = peak differential magnitude. In-burst points cluster
+    // near it; noise/gaps sit far below. Points are placed at radius |d|/refMag
+    // — NOT normalised to the unit circle — so weak residual points fall toward
+    // the centre instead of polluting the cluster ring.
     double refMag = 0.0;
-    for (size_t i = k.delay; i < k.len; ++i) {
-        const auto d = samples[i] * std::conj(samples[i - k.delay]);
+    for (const auto &d : dv) {
         const double m = std::abs(d);
         if (std::isfinite(m) && m > refMag)
             refMag = m;
     }
     if (refMag < kMinMag)
         return img;
-
-    // Signal-strength gate: drop samples below gatePct·peak so only strong
-    // (in-burst) parts reach the scope. Points are placed at radius |d|/refMag —
-    // NOT normalised to the unit circle — so weak residual points fall toward
-    // the centre instead of polluting the cluster ring, and symbol centres sit
-    // out near the rim. (The old per-point /mag normalisation is exactly what
-    // pulled noise up onto the circle.)
     const double gate = std::max(refMag * (k.gatePct / 100.0), kMinMag);
     const double rscale = radius / refMag;
 
     std::vector<uint32_t> hits(static_cast<size_t>(k.w) * k.h, 0);
     uint32_t maxHit = 0;
-    // k.len is capped at kMaxSamples, so visiting every sample is already a
-    // bounded (≤500k) loop — no decimation stride needed.
-    for (size_t i = k.delay; i < k.len; ++i) {
-        const auto d = samples[i] * std::conj(samples[i - k.delay]);
+    for (const auto &d : dv) {
         const double mag = std::abs(d);
         if (!std::isfinite(mag) || mag < gate)
             continue;
@@ -122,6 +166,12 @@ void FskPolarPlot::setSymbolRate(double baud)
 void FskPolarPlot::setLevelGate(int pct)
 {
     levelGatePct = std::max(0, std::min(100, pct));
+    emit repaint();
+}
+
+void FskPolarPlot::setSymbolTimed(bool on)
+{
+    symbolTimed_ = on;
     emit repaint();
 }
 
@@ -236,12 +286,15 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
 
     // delay = round(Fs/baud); show it (and the baud) so a wrong setting — e.g. a
     // too-small delay that collapses the scope to one blob — is obvious.
+    const double sps = iqSource->rate() / symbolRateHz; // exact (fractional)
+    const bool symbolTimed = symbolTimed_ && sps >= 2.0;
     const QString scope = selectionEnabled ? QStringLiteral("sel") : QStringLiteral("view");
-    drawStatus(QStringLiteral("%1 · %2 Bd · delay %3 samp · gate %4%")
+    drawStatus(QStringLiteral("%1 · %2 Bd · delay %3 samp · gate %4%%5")
                    .arg(scope)
                    .arg(symbolRateHz, 0, 'f', symbolRateHz < 1000.0 ? 1 : 0)
                    .arg(delay)
-                   .arg(levelGatePct));
+                   .arg(levelGatePct)
+                   .arg(symbolTimed ? QStringLiteral(" · sym-timed") : QString()));
 
     size_t len = sampleRange.maximum - sampleRange.minimum;
     if (len <= delay + 1)
@@ -257,7 +310,7 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     if (w < 1 || h < 1)
         return;
 
-    const RenderKey key{start, len, delay, w, h, levelGatePct, dataEpoch_};
+    const RenderKey key{start, len, delay, w, h, levelGatePct, dataEpoch_, symbolTimed, sps};
     pendingKey_ = key;
     havePending_ = true;
 

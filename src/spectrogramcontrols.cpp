@@ -356,6 +356,19 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     connect(constellationGateSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::constellationGateChanged);
 
+    // Symbol-timed constellation: resample to one point per symbol (using the
+    // symbol rate above) so the inter-symbol trajectory spokes collapse into
+    // clean decision-point clusters. Off shows the full-rate trajectory.
+    constellationSymbolTimedCheckBox = new QCheckBox(widget);
+    constellationSymbolTimedCheckBox->setChecked(true);
+    constellationSymbolTimedCheckBox->setToolTip(tr(
+        "Sample the FSK polar plot once per symbol (timing recovered) so the "
+        "constellation shows decision-point clusters instead of the full-rate "
+        "trajectory. Needs a valid symbol rate."));
+    layout->addRow(new QLabel(tr("Constellation symbol-timed:")), constellationSymbolTimedCheckBox);
+    connect(constellationSymbolTimedCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::constellationSymbolTimedChanged);
+
     widget->setLayout(layout);
     setWidget(widget);
 

@@ -166,6 +166,17 @@ void PlotView::setConstellationGate(int pct)
     }
 }
 
+// Toggle symbol-timed (1 point/symbol) vs full-rate constellation rendering.
+void PlotView::setConstellationSymbolTimed(bool on)
+{
+    constellationSymbolTimed = on;
+    for (auto &plt : plots) {
+        if (auto fskp = dynamic_cast<FskPolarPlot*>(plt.get())) {
+            fskp->setSymbolTimed(on);
+        }
+    }
+}
+
 void PlotView::setFmDecimation(int n)
 {
     if (n < 1) n = 1;
@@ -431,6 +442,7 @@ void PlotView::addPlot(Plot *plot)
     if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
         fskp->setSymbolRate(symbolRateHz);
         fskp->setLevelGate(constellationGatePct);
+        fskp->setSymbolTimed(constellationSymbolTimed);
         fskp->setSelection(cursorsEnabled, selectedSamples);
     }
     if (auto hist = dynamic_cast<HistogramPlot*>(plot)) {

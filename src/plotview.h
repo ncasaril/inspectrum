@@ -97,6 +97,8 @@ public slots:
     void setSymbolRate(double baud);
     // Signal-strength gate (% of window peak) for the FSK polar constellation.
     void setConstellationGate(int pct);
+    // Symbol-timed (1 point/symbol) vs full-rate FSK polar constellation.
+    void setConstellationSymbolTimed(bool on);
     // Pick reasonable LPF cutoff, predemod M, and post N from the current
     // sample rate and tuner bandwidth. Applies them and emits
     // fmAutoLpfComputed() so the dock widgets can mirror.
@@ -190,6 +192,8 @@ private:
     double symbolRateHz = 0.0;
     // Constellation signal-strength gate (% of window peak), re-applied likewise.
     int    constellationGatePct = 15;
+    // Symbol-timed constellation rendering, re-applied to new FSK polar plots.
+    bool   constellationSymbolTimed = true;
     // Shift+left-drag annotation rubber-banding on the spectrogram. The
     // rectangle is in viewport coords; on release we map x→sample range and
     // y→absolute Hz range, then open AnnotationDialog.
