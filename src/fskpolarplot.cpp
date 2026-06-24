@@ -195,22 +195,53 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     if (selectionEnabled && selectedRange.maximum > selectedRange.minimum)
         sampleRange = selectedRange;
 
-    if (!iqSource || sampleRange.maximum <= sampleRange.minimum)
-        return;
-
     const size_t delay = delayForRate();
-    if (delay == 0) {
-        // Either no symbol rate, or a symbol period too long for the window —
-        // both draw a hint rather than a meaningless ring.
+
+    // Always-visible status line just below the title, on a dark pill so it
+    // reads over the constellation — lets the symbol rate / delay be verified
+    // at a glance (a too-small delay collapses the scope to one blob).
+    auto drawStatus = [&](const QString &text) {
         painter.save();
-        painter.setPen(QColor(200, 200, 200));
-        const QString msg = (symbolRateHz > 0.0)
-            ? QStringLiteral("symbol period too long for the window\n(decimate, or raise the symbol rate)")
-            : QStringLiteral("set Symbol rate (Bd)\nto view the constellation");
-        painter.drawText(rect, Qt::AlignCenter, msg);
+        const QFontMetrics fmx(painter.font());
+        const int pad = 3;
+        const int x = rect.left() + 6;
+        const int baseline = rect.top() + 6 + fmx.height() + fmx.ascent();
+        painter.fillRect(x - pad, baseline - fmx.ascent() - pad,
+                         fmx.width(text) + 2 * pad, fmx.height() + 2 * pad,
+                         QColor(0, 0, 0, 180));
+        painter.setPen(QColor(230, 230, 230));
+        painter.drawText(x, baseline, text);
+        painter.restore();
+    };
+
+    if (!iqSource || sampleRange.maximum <= sampleRange.minimum) {
+        drawStatus(QStringLiteral("no data"));
+        return;
+    }
+
+    if (delay == 0) {
+        drawStatus(symbolRateHz > 0.0
+            ? QStringLiteral("symbol rate %1 Bd — period too long for window")
+                  .arg(symbolRateHz, 0, 'f', 0)
+            : QStringLiteral("symbol rate: not set"));
+        painter.save();
+        painter.setPen(QColor(160, 160, 160));
+        painter.drawText(rect, Qt::AlignCenter,
+            symbolRateHz > 0.0
+                ? QStringLiteral("symbol period too long\n(decimate or raise the rate)")
+                : QStringLiteral("set Symbol rate (Bd)\nto view the constellation"));
         painter.restore();
         return;
     }
+
+    // delay = round(Fs/baud); show it (and the baud) so a wrong setting — e.g. a
+    // too-small delay that collapses the scope to one blob — is obvious.
+    const QString scope = selectionEnabled ? QStringLiteral("sel") : QStringLiteral("view");
+    drawStatus(QStringLiteral("%1 · %2 Bd · delay %3 samp · gate %4%")
+                   .arg(scope)
+                   .arg(symbolRateHz, 0, 'f', symbolRateHz < 1000.0 ? 1 : 0)
+                   .arg(delay)
+                   .arg(levelGatePct));
 
     size_t len = sampleRange.maximum - sampleRange.minimum;
     if (len <= delay + 1)
@@ -236,19 +267,6 @@ void FskPolarPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> samp
     const bool needRender = !hasImage_ || imageKey_ != key;
     if (needRender && !running_)
         startRender(key);
-
-    // Cheap GUI-thread overlay: confirm the delay really is ~1 symbol.
-    painter.save();
-    painter.setPen(QColor(210, 210, 210));
-    const QString scope = selectionEnabled ? QStringLiteral("selection")
-                                           : QStringLiteral("visible");
-    const QString info = QStringLiteral("%1 · delay %2 samp = 1 symbol @ %3 Bd · gate %4%")
-                             .arg(scope)
-                             .arg(delay)
-                             .arg(symbolRateHz, 0, 'f', symbolRateHz < 1000.0 ? 1 : 0)
-                             .arg(levelGatePct);
-    painter.drawText(rect.left() + 6, rect.bottom() - 6, info);
-    painter.restore();
 }
 
 void FskPolarPlot::startRender(const RenderKey &k)
