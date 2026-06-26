@@ -238,6 +238,10 @@ private:
     std::vector<float> getTunerTaps();
     int linesPerTile();
     void paintFrequencyScale(QPainter &painter, QRect &rect);
+    // Live centre-frequency / pass-band-width readout drawn next to the tuner
+    // band while it's enabled, so dragging the tuner cursors shows the filter
+    // width (e.g. "BW 25 kHz") and centre frequency in Hz instead of pixels.
+    void paintTunerReadout(QPainter &painter, QRect &rect);
     void paintAnnotations(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
 };
 
