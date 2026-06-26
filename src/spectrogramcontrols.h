@@ -25,6 +25,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QLabel>
@@ -60,6 +61,10 @@ signals:
     void symbolRateChanged(double baud);
     // Amplitude squelch (% of window-peak |IQ|) for FM plots. 0 = off.
     void fmSquelchChanged(int pct);
+    // Toggle the AM plot between linear power and a dB scale.
+    void amDbModeChanged(bool on);
+    // Full-scale reference (dBm) added to AM plots in dB mode. 0 = dBFS.
+    void amRefLevelChanged(double dbm);
     // Signal-strength gate (% of window peak) for the FSK polar constellation.
     void constellationGateChanged(int pct);
     // Symbol-timed (1 point/symbol) vs full-rate FSK polar constellation.
@@ -178,6 +183,9 @@ public:
     QSpinBox   *fmPredemodDecimSpinBox;
     // FM amplitude squelch (% of window-peak |IQ|; 0 disables)
     QSpinBox   *fmSquelchSpinBox;
+    // AM dB-scale toggle and its full-scale reference (dBm; 0 = dBFS).
+    QCheckBox     *amDbCheckBox;
+    QDoubleSpinBox *amRefLevelSpinBox;
     // Auto-tune button: PlotView picks reasonable values for cutoff, M, N.
     QPushButton *fmAutoLpfButton;
     // Symbol rate (Bd) for the FSK polar plot, plus a button that copies the

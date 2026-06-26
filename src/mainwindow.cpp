@@ -76,6 +76,9 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
     // FM amplitude squelch (% of window-peak |IQ|).
     connect(dock, &SpectrogramControls::fmSquelchChanged, plots, &PlotView::setFmSquelch);
+    // AM plot dB scale + full-scale reference (dBm; 0 = dBFS).
+    connect(dock, &SpectrogramControls::amDbModeChanged, plots, &PlotView::setAmDbMode);
+    connect(dock, &SpectrogramControls::amRefLevelChanged, plots, &PlotView::setAmReferenceLevel);
     // Symbol rate (Bd) for the FSK polar plot's differential delay.
     connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
     // Signal-strength gate (%) for the FSK polar constellation.

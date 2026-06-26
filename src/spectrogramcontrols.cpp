@@ -20,6 +20,7 @@
 
 #include "spectrogramcontrols.h"
 #include <QIntValidator>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QSettings>
@@ -308,6 +309,34 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("FM squelch:")), fmSquelchSpinBox);
     connect(fmSquelchSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::fmSquelchChanged);
+
+    // AM amplitude scale: linear power (default) vs a logarithmic dB scale.
+    // In dB the trace reads dBFS, or calibrated dBm once a full-scale
+    // reference is supplied below (the file carries no power calibration, so
+    // dBm needs the receiver's reference level entered by hand).
+    amDbCheckBox = new QCheckBox(widget);
+    amDbCheckBox->setChecked(false);
+    amDbCheckBox->setToolTip(tr(
+        "Show the AM (amplitude) plot on a dB scale instead of linear power. "
+        "Reads dBFS (dB below full scale); set a full-scale reference below to "
+        "read calibrated dBm."));
+    layout->addRow(new QLabel(tr("AM scale dB:")), amDbCheckBox);
+    connect(amDbCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::amDbModeChanged);
+
+    amRefLevelSpinBox = new QDoubleSpinBox(widget);
+    amRefLevelSpinBox->setRange(-200.0, 200.0);
+    amRefLevelSpinBox->setDecimals(1);
+    amRefLevelSpinBox->setSingleStep(1.0);
+    amRefLevelSpinBox->setValue(0.0);
+    amRefLevelSpinBox->setSuffix(" dBm");
+    amRefLevelSpinBox->setToolTip(tr(
+        "Power (dBm) corresponding to full scale (|IQ| = 1). Added to the AM "
+        "dB output so the plot reads true dBm — enter your receiver's "
+        "reference level. 0 leaves the scale as dBFS."));
+    layout->addRow(new QLabel(tr("AM full-scale ref:")), amRefLevelSpinBox);
+    connect(amRefLevelSpinBox, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            this, &SpectrogramControls::amRefLevelChanged);
 
     // Auto-tune button: ask PlotView to pick reasonable values for cutoff,
     // predemod M, and post N. PlotView computes from current Fs and tuner

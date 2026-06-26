@@ -18,6 +18,7 @@
  */
 
 #include "plotview.h"
+#include "amplitudedemod.h"
 #include "annotationdialog.h"
 #include "frequencydemod.h"
 #include "fskdemod.h"
@@ -253,6 +254,34 @@ void PlotView::setFmSquelch(int pct)
     if (periodTimer) periodTimer->start();
 }
 
+// Switch every AM (AmplitudeDemod) plot between linear power and dB.
+void PlotView::setAmDbMode(bool on)
+{
+    amDbMode = on;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get()))
+                am->setDbMode(on);
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
+// Full-scale reference (dBm) added to AM plots in dB mode. 0 = dBFS.
+void PlotView::setAmReferenceLevel(double dbm)
+{
+    amRefLevelDbm = dbm;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get()))
+                am->setReferenceLevelDbm(dbm);
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
 void PlotView::autoTuneFmLpf()
 {
     if (!spectrogramPlot || sampleRate <= 0.0) return;
@@ -455,6 +484,10 @@ void PlotView::addPlot(Plot *plot)
             fsk->setPredemodDecimation(fmPredemodDecim);
             fsk->setCheapDemod(fmFastDemod);
         }
+        if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get())) {
+            am->setDbMode(amDbMode);
+            am->setReferenceLevelDbm(amRefLevelDbm);
+        }
     }
     if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
         fskp->setSymbolRate(symbolRateHz);
@@ -550,6 +583,14 @@ QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx, double *rawValue
         if (dynamic_cast<FrequencyDemod*>(src.get())) {
             return QStringLiteral("%1Hz")
                 .arg(QString::fromStdString(formatSIValue(v)));
+        }
+        // AM in dB mode reads in dBFS, or dBm once a full-scale reference is
+        // set (ref 0 = dBFS by convention).
+        if (auto am = dynamic_cast<AmplitudeDemod*>(src.get())) {
+            if (am->dbMode()) {
+                const char *unit = (am->referenceLevelDbm() != 0.0) ? " dBm" : " dBFS";
+                return QString::number(v, 'f', 1) + QLatin1String(unit);
+            }
         }
         return QString::number(v, 'g', 6);
     }
