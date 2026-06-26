@@ -116,6 +116,11 @@ public:
     // Convert a y in plot-local coords (0..height()) to absolute Hz, using the
     // input source's centre frequency.
     double freqAtPlotY(int y) const;
+    // Inverse of freqAtPlotY: plot-local y (0..height()) for an absolute Hz.
+    int plotYAtFreq(double hz) const;
+    // Index of the annotation to draw resize handles on (it's being hovered or
+    // edited in PlotView), or -1 for none. Purely a paint hint.
+    void setActiveAnnotation(int index) { activeAnnotation_ = index; }
 
 public slots:
     void setFFTSize(int size);
@@ -176,6 +181,9 @@ private:
     WindowType windowType = WindowType::Hann;
     // Splat method when accumulating reassigned energy.
     SplatMethod splatMethod = SplatMethod::Bilinear;
+    // Annotation index to draw resize handles on (-1 = none). Set by PlotView
+    // while hovering/editing an annotation; only affects paintAnnotations.
+    int activeAnnotation_ = -1;
 
     // Worker FFT plan + buffer pool for parallel reassigned tile compute.
     // Plans must be created on a single thread (FFTW planning isn't

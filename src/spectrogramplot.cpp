@@ -322,7 +322,31 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             }
             painter.drawRect(x, y, width, height);
 
-            visibleAnnotationLocations.emplace_back(a, x, y, width, height);
+            // Resize handles for the active (hovered / editing) annotation.
+            if (i == activeAnnotation_) {
+                const int hs = 3; // half handle size
+                const int xr = x + width, yb = y + height;
+                const int xm = x + width / 2, ym = y + height / 2;
+                painter.setPen(QPen(Qt::black, 1));
+                const int hx[] = { x, xm, xr, x, xr, x, xm, xr };
+                const int hy[] = { y, y,  y,  ym, ym, yb, yb, yb };
+                for (int k = 0; k < 8; ++k) {
+                    painter.fillRect(hx[k] - hs, hy[k] - hs, 2 * hs, 2 * hs, Qt::white);
+                    painter.drawRect(hx[k] - hs, hy[k] - hs, 2 * hs, 2 * hs);
+                }
+            }
+
+            // Hit rect for right-click / tooltip: pad by a few px and include
+            // the label drawn above the box so clicking the visible label (the
+            // natural target) still resolves to this annotation.
+            const int slop = 4;
+            int labelTop = sigmfAnnotationLabels ? (y - 2 - fm.ascent()) : y;
+            int labelW = sigmfAnnotationLabels ? fm.boundingRect(a.label).width() : 0;
+            int hitX = x - slop;
+            int hitY = std::min(y, labelTop) - slop;
+            int hitW = std::max(width, labelW) + 2 * slop;
+            int hitH = (y + height) - hitY + slop;
+            visibleAnnotationLocations.emplace_back(a, hitX, hitY, hitW, hitH);
         }
     }
 
@@ -374,6 +398,13 @@ double SpectrogramPlot::freqAtPlotY(int y) const
     if (height() <= 0 || sampleRate <= 0.0) return 0.0;
     const double offset = ((double)height() * 0.5 - (double)y) * sampleRate / (double)height();
     return inputSource->getFrequency() + offset;
+}
+
+int SpectrogramPlot::plotYAtFreq(double hz) const
+{
+    if (height() <= 0 || sampleRate <= 0.0) return 0;
+    const double offset = hz - inputSource->getFrequency();
+    return (int)std::lround((double)height() * 0.5 - offset * (double)height() / sampleRate);
 }
 
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)

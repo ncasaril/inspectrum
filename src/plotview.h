@@ -215,6 +215,35 @@ private:
     bool startAnnotationDrag(QMouseEvent *event);
     void updateAnnotationDrag(QMouseEvent *event);
     void finishAnnotationDrag(QMouseEvent *event);
+
+    // --- Interactive bounds editing of an existing annotation ------------
+    // Which part of an annotation's box a point is grabbing: an edge/corner
+    // resizes that side, the body moves the whole box.
+    enum class AnnoGrab {
+        None, Move, Left, Right, Top, Bottom,
+        TopLeft, TopRight, BottomLeft, BottomRight
+    };
+    int      hoveredAnnotation = -1;   // drawn with handles; drives hover cursor
+    int      editingAnnotation = -1;   // currently being dragged (-1 = none)
+    AnnoGrab editGrab = AnnoGrab::None;
+    QPoint   editPressPos;             // viewport pos where the drag began
+    Annotation editOrig;               // annotation snapshot at drag start
+    // Viewport rectangle of an annotation's box at the current scroll/zoom.
+    QRect annotationViewportRect(const Annotation &a);
+    // Which grab region (if any) `pos` is over for box `r` (handle margin px).
+    AnnoGrab grabForRect(const QRect &r, QPoint pos) const;
+    Qt::CursorShape cursorForGrab(AnnoGrab g) const;
+    // Topmost annotation whose box/handles `pos` grabs; fills *grabOut. -1 none.
+    int annotationGrabAt(QPoint pos, AnnoGrab *grabOut);
+    // Map a viewport coordinate back to a sample index / absolute Hz.
+    long long sampleAtViewportX(int vx);
+    double freqAtViewportY(int vy) const;
+    // Hover (no button): set the active annotation + resize cursor.
+    void updateAnnotationHover(QMouseEvent *event);
+    // Press/drag/release on an annotation box to move or resize it.
+    bool beginAnnotationEdit(QMouseEvent *event);
+    void updateAnnotationEdit(QMouseEvent *event);
+    void finishAnnotationEdit(QMouseEvent *event);
     // Compose an annotation from a viewport rectangle and open the editor.
     // On accept, appends to the input source.
     void promptNewAnnotation(QRect viewportRect);

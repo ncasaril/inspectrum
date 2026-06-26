@@ -976,21 +976,223 @@ void PlotView::onAnnotationsChanged()
     viewport()->update();
 }
 
+QRect PlotView::annotationViewportRect(const Annotation &a)
+{
+    if (!spectrogramPlot) return QRect();
+    const int hscroll = horizontalScrollBar()->value();
+    const int vscroll = verticalScrollBar()->value();
+    const int x0 = sampleToColumn(a.sampleRange.minimum) - hscroll;
+    const int x1 = sampleToColumn(a.sampleRange.maximum) - hscroll;
+    // Higher frequency = smaller y, so freqMax is the top edge.
+    const int yTop = spectrogramPlot->plotYAtFreq(a.frequencyRange.maximum) - vscroll;
+    const int yBot = spectrogramPlot->plotYAtFreq(a.frequencyRange.minimum) - vscroll;
+    return QRect(QPoint(x0, yTop), QPoint(x1, yBot)).normalized();
+}
+
+PlotView::AnnoGrab PlotView::grabForRect(const QRect &r, QPoint p) const
+{
+    const int M = 6; // edge/handle grab margin in px
+    const bool inX = p.x() >= r.left() - M && p.x() <= r.right() + M;
+    const bool inY = p.y() >= r.top() - M && p.y() <= r.bottom() + M;
+    if (!inX || !inY) return AnnoGrab::None;
+    const bool nL = std::abs(p.x() - r.left())   <= M;
+    const bool nR = std::abs(p.x() - r.right())  <= M;
+    const bool nT = std::abs(p.y() - r.top())    <= M;
+    const bool nB = std::abs(p.y() - r.bottom()) <= M;
+    if (nT && nL) return AnnoGrab::TopLeft;
+    if (nT && nR) return AnnoGrab::TopRight;
+    if (nB && nL) return AnnoGrab::BottomLeft;
+    if (nB && nR) return AnnoGrab::BottomRight;
+    if (nL) return AnnoGrab::Left;
+    if (nR) return AnnoGrab::Right;
+    if (nT) return AnnoGrab::Top;
+    if (nB) return AnnoGrab::Bottom;
+    return AnnoGrab::Move; // inside the body
+}
+
+Qt::CursorShape PlotView::cursorForGrab(AnnoGrab g) const
+{
+    switch (g) {
+        case AnnoGrab::Left:
+        case AnnoGrab::Right:        return Qt::SizeHorCursor;
+        case AnnoGrab::Top:
+        case AnnoGrab::Bottom:       return Qt::SizeVerCursor;
+        case AnnoGrab::TopLeft:
+        case AnnoGrab::BottomRight:  return Qt::SizeFDiagCursor;
+        case AnnoGrab::TopRight:
+        case AnnoGrab::BottomLeft:   return Qt::SizeBDiagCursor;
+        case AnnoGrab::Move:         return Qt::SizeAllCursor;
+        default:                     return Qt::ArrowCursor;
+    }
+}
+
+int PlotView::annotationGrabAt(QPoint pos, AnnoGrab *grabOut)
+{
+    if (!spectrogramPlot || !isOverSpectrogram(pos.y())) {
+        if (grabOut) *grabOut = AnnoGrab::None;
+        return -1;
+    }
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    // Topmost (last drawn) wins, so iterate in reverse.
+    for (int i = (int)inputSrc->annotationList.size() - 1; i >= 0; --i) {
+        QRect r = annotationViewportRect(inputSrc->annotationList[i]);
+        AnnoGrab g = grabForRect(r, pos);
+        if (g != AnnoGrab::None) {
+            if (grabOut) *grabOut = g;
+            return i;
+        }
+    }
+    if (grabOut) *grabOut = AnnoGrab::None;
+    return -1;
+}
+
+long long PlotView::sampleAtViewportX(int vx)
+{
+    long long col = (long long)vx + horizontalScrollBar()->value();
+    if (col < 0) col = 0;
+    return col * (long long)samplesPerColumn();
+}
+
+double PlotView::freqAtViewportY(int vy) const
+{
+    if (!spectrogramPlot) return 0.0;
+    return spectrogramPlot->freqAtPlotY(vy + verticalScrollBar()->value());
+}
+
+void PlotView::updateAnnotationHover(QMouseEvent *event)
+{
+    AnnoGrab g = AnnoGrab::None;
+    int idx = annotationGrabAt(event->pos(), &g);
+    // Only claim the cursor while over an annotation; otherwise release it so
+    // the tuner / default cursor handling still works.
+    if (g != AnnoGrab::None)
+        viewport()->setCursor(cursorForGrab(g));
+    else
+        viewport()->unsetCursor();
+    if (idx != hoveredAnnotation) {
+        hoveredAnnotation = idx;
+        spectrogramPlot->setActiveAnnotation(idx);
+        viewport()->update();
+    }
+}
+
+bool PlotView::beginAnnotationEdit(QMouseEvent *event)
+{
+    AnnoGrab g = AnnoGrab::None;
+    int idx = annotationGrabAt(event->pos(), &g);
+    if (idx < 0 || g == AnnoGrab::None)
+        return false;
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    editingAnnotation = idx;
+    editGrab = g;
+    editPressPos = event->pos();
+    editOrig = inputSrc->annotationList[idx];
+    spectrogramPlot->setActiveAnnotation(idx);
+    viewport()->setCursor(cursorForGrab(g));
+    return true;
+}
+
+void PlotView::updateAnnotationEdit(QMouseEvent *event)
+{
+    if (editingAnnotation < 0) return;
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    if (editingAnnotation >= (int)inputSrc->annotationList.size()) {
+        editingAnnotation = -1;
+        return;
+    }
+
+    const long long count = (long long)inputSrc->count();
+    long long dS = sampleAtViewportX(event->pos().x()) - sampleAtViewportX(editPressPos.x());
+    double    dF = freqAtViewportY(event->pos().y()) - freqAtViewportY(editPressPos.y());
+
+    long long oMin = (long long)editOrig.sampleRange.minimum;
+    long long oMax = (long long)editOrig.sampleRange.maximum;
+    double    oLo  = editOrig.frequencyRange.minimum;
+    double    oHi  = editOrig.frequencyRange.maximum;
+    long long nMin = oMin, nMax = oMax;
+    double    nLo  = oLo,  nHi  = oHi;
+
+    switch (editGrab) {
+        case AnnoGrab::Move:
+            // Clamp the shift so the whole box stays within the file.
+            if (oMin + dS < 0) dS = -oMin;
+            if (count > 0 && oMax + dS > count - 1) dS = (count - 1) - oMax;
+            nMin = oMin + dS; nMax = oMax + dS;
+            nLo = oLo + dF;   nHi = oHi + dF;
+            break;
+        case AnnoGrab::Left:        nMin = oMin + dS; break;
+        case AnnoGrab::Right:       nMax = oMax + dS; break;
+        case AnnoGrab::Top:         nHi  = oHi + dF;  break; // top edge = higher freq
+        case AnnoGrab::Bottom:      nLo  = oLo + dF;  break;
+        case AnnoGrab::TopLeft:     nMin = oMin + dS; nHi = oHi + dF; break;
+        case AnnoGrab::TopRight:    nMax = oMax + dS; nHi = oHi + dF; break;
+        case AnnoGrab::BottomLeft:  nMin = oMin + dS; nLo = oLo + dF; break;
+        case AnnoGrab::BottomRight: nMax = oMax + dS; nLo = oLo + dF; break;
+        default: break;
+    }
+
+    if (nMin < 0) nMin = 0;
+    if (nMax < 0) nMax = 0;
+    if (count > 0) {
+        if (nMin > count - 1) nMin = count - 1;
+        if (nMax > count - 1) nMax = count - 1;
+    }
+    if (nMin > nMax) std::swap(nMin, nMax);
+    if (nLo > nHi)   std::swap(nLo, nHi);
+
+    Annotation &a = inputSrc->annotationList[editingAnnotation];
+    a.sampleRange = { (size_t)nMin, (size_t)nMax };
+    a.frequencyRange = { nLo, nHi };
+    viewport()->update();
+}
+
+void PlotView::finishAnnotationEdit(QMouseEvent *event)
+{
+    if (editingAnnotation < 0) return;
+    updateAnnotationEdit(event);
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    const int idx = editingAnnotation;
+    editingAnnotation = -1;
+    editGrab = AnnoGrab::None;
+    if (idx >= 0 && idx < (int)inputSrc->annotationList.size()) {
+        // Commit through updateAnnotation so the dirty flag + change callbacks
+        // fire (enables Save, marks the title bar). The value is the one we
+        // edited live in place.
+        inputSrc->updateAnnotation(idx, inputSrc->annotationList[idx]);
+    }
+}
+
 bool PlotView::viewportEvent(QEvent *event) {
     if (event->type() == QEvent::MouseMove) {
         LatencyLog::mark("MouseMove ----------");
     } else if (event->type() == QEvent::Wheel) {
         LatencyLog::mark("Wheel ----------");
     }
-    // Shift+left-drag rectangle on the spectrogram → new annotation. Run
-    // before the per-plot dispatch so it doesn't accidentally drag the tuner.
+    // An in-progress annotation move/resize drag owns the mouse until release.
+    if (editingAnnotation >= 0) {
+        if (event->type() == QEvent::MouseMove) {
+            updateAnnotationEdit(static_cast<QMouseEvent*>(event));
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            finishAnnotationEdit(static_cast<QMouseEvent*>(event));
+            return true;
+        }
+    }
+
+    // Shift+left-drag on the spectrogram → new annotation; plain left-press on
+    // an existing annotation's box/handles → move/resize it. Both run before the
+    // per-plot dispatch so they don't drag the tuner. Hover (no button) shows
+    // the resize handles + cursor.
     if (event->type() == QEvent::MouseButtonPress) {
         auto *me = static_cast<QMouseEvent*>(event);
-        if (me->button() == Qt::LeftButton &&
-            (me->modifiers() & Qt::ShiftModifier) &&
-            spectrogramPlot &&
-            startAnnotationDrag(me)) {
-            return true;
+        if (me->button() == Qt::LeftButton && spectrogramPlot) {
+            if (me->modifiers() & Qt::ShiftModifier) {
+                if (startAnnotationDrag(me))
+                    return true;
+            } else if (beginAnnotationEdit(me)) {
+                return true;
+            }
         }
     } else if (event->type() == QEvent::MouseMove && annotDragging) {
         updateAnnotationDrag(static_cast<QMouseEvent*>(event));
@@ -998,6 +1200,10 @@ bool PlotView::viewportEvent(QEvent *event) {
     } else if (event->type() == QEvent::MouseButtonRelease && annotDragging) {
         finishAnnotationDrag(static_cast<QMouseEvent*>(event));
         return true;
+    } else if (event->type() == QEvent::MouseMove && spectrogramPlot) {
+        auto *me = static_cast<QMouseEvent*>(event);
+        if (me->buttons() == Qt::NoButton)
+            updateAnnotationHover(me);
     }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
