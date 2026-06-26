@@ -58,10 +58,31 @@ private:
     QJsonObject _originalSigmfRoot;
     bool _wasSigmfInput = false;
     bool _annotationsDirty = false;
+    // SigMF-archive (tar / tar+zstd) tracking, so saveAnnotations can append an
+    // updated .sigmf-meta member back into the container instead of orphaning a
+    // sidecar in the decompression cache. _containerPath is the ORIGINAL file
+    // the user opened (the .sigmf.zst / .sigmf / .tar), not the decompressed
+    // temp that _filePath points at. _archiveMetaName is the tar member name of
+    // the meta entry, reused for the appended member so it reads as an update.
+    bool _isArchive = false;
+    bool _archiveZstd = false;
+    QString _containerPath;
+    QString _archiveMetaName;
     using AnnotationCallback = std::function<void()>;
     std::vector<AnnotationCallback> _annotCbs;
 
     QJsonObject readMetaData(const QString &filename);
+    // Body of openFile, separated so the public openFile can reset the
+    // container-tracking state once and then recurse (for transparent zstd)
+    // without that reset clobbering what an outer frame discovered.
+    void openFileImpl(const char *filename);
+    // Append an updated .sigmf-meta to the open SigMF archive: build a tar
+    // member (+ EOF blocks), zstd-compress it as one frame when the container
+    // is compressed, and append it to _containerPath. The original bytes are
+    // never modified — a failed write is rolled back by truncating to the
+    // pre-append size. The newest meta wins on the next open. Returns false and
+    // sets *errorOut on failure.
+    bool appendMetaToArchive(const QJsonObject &root, QString *errorOut);
     // Parse a SigMF meta document (the JSON bytes of a .sigmf-meta) and apply
     // it: pick the sampleAdapter from core:datatype and populate sampleRate /
     // frequency / annotations. Shared by the .sigmf-* pair path and the

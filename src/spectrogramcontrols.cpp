@@ -196,8 +196,11 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     saveAnnotationsButton = new QPushButton(tr("Save annotations"), widget);
     saveAnnotationsButton->setEnabled(false);
     saveAnnotationsButton->setToolTip(tr(
-        "Write the current annotation list to a .sigmf-meta sidecar next to "
-        "the data file. Becomes enabled after add/edit/delete."));
+        "Persist the current annotation list. For a .sigmf-meta/.sigmf-data "
+        "pair this rewrites the .sigmf-meta; for a SigMF archive (.sigmf / "
+        ".sigmf.zst) it appends an updated meta member (the data is not "
+        "recompressed) so the newest notes win on the next open. Becomes "
+        "enabled after add/edit/delete."));
     layout->addRow(saveAnnotationsButton);
     connect(saveAnnotationsButton, &QPushButton::clicked,
             this, &SpectrogramControls::saveAnnotationsRequested);
