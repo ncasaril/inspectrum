@@ -91,6 +91,10 @@ signals:
     void reassignmentSplatChanged(int sm);
     // User clicked "Save annotations". MainWindow handles the actual write.
     void saveAnnotationsRequested();
+    // Edited the global file title / description. MainWindow forwards to the
+    // InputSource; persisted on the next save.
+    void fileTitleChanged(QString title);
+    void fileDescriptionChanged(QString description);
 
 public slots:
     void timeSelectionChanged(float time);
@@ -101,6 +105,9 @@ public slots:
     // button and tweaks its label so the user can see when there's pending
     // work without watching the title bar.
     void setAnnotationsDirty(bool dirty);
+    // Populate the global title / description fields (called on file open).
+    // Uses setText so it doesn't re-emit the *Changed signals.
+    void setFileInfo(const QString &title, const QString &description);
     void applyAutoLpf(double cutoffHz, int predemodM, int postN);
     // Show the auto-detected period (in seconds) of the visible FM trace.
     // periodSeconds <= 0 clears the label (no signal / not enough data).
@@ -199,4 +206,8 @@ public:
     // Save annotations to a .sigmf-meta sidecar. Shown disabled when the
     // annotation list hasn't been mutated since the last load/save.
     QPushButton *saveAnnotationsButton;
+    // Editable SigMF global metadata: title (inspectrum:title) + description
+    // (core:description).
+    QLineEdit *fileTitleEdit;
+    QLineEdit *fileDescriptionEdit;
 };

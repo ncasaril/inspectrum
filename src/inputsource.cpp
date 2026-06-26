@@ -489,6 +489,11 @@ QJsonObject InputSource::parseMetaDocument(const QByteArray &bytes)
     }
     _datatype = datatype;
 
+    // Editable global metadata. core:description is the standard free-text
+    // note; inspectrum:title is our non-standard short name.
+    _globalDescription = global["core:description"].toString();
+    _globalTitle = global["inspectrum:title"].toString();
+
     if (global.contains("core:sample_rate") && global["core:sample_rate"].isDouble()) {
         setSampleRate(global["core:sample_rate"].toDouble());
     }
@@ -695,7 +700,25 @@ void InputSource::openFile(const char *filename)
     _archiveZstd = false;
     _containerPath.clear();
     _archiveMetaName.clear();
+    _globalDescription.clear();
+    _globalTitle.clear();
     openFileImpl(filename);
+}
+
+void InputSource::setGlobalDescription(const QString &text)
+{
+    if (_globalDescription == text) return;
+    _globalDescription = text;
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+}
+
+void InputSource::setGlobalTitle(const QString &text)
+{
+    if (_globalTitle == text) return;
+    _globalTitle = text;
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
 }
 
 void InputSource::openFileImpl(const char *filename)
@@ -1181,6 +1204,18 @@ bool InputSource::saveAnnotations(QString *errorOut)
         root.insert("global", global);
         root.insert("captures", captures);
         root.insert("annotations", annotations);
+    }
+
+    // Fold the editable global metadata into global. Only write non-empty
+    // values so we don't clobber a synthesized description or litter the file
+    // with empty keys.
+    {
+        QJsonObject g = root["global"].toObject();
+        if (!_globalDescription.isEmpty())
+            g.insert("core:description", _globalDescription);
+        if (!_globalTitle.isEmpty())
+            g.insert("inspectrum:title", _globalTitle);
+        root.insert("global", g);
     }
 
     // SigMF archive (tar / tar+zstd): append an updated .sigmf-meta member back

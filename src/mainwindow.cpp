@@ -49,6 +49,11 @@ MainWindow::MainWindow()
 
     connect(dock, &SpectrogramControls::saveAnnotationsRequested,
             this, &MainWindow::saveAnnotations);
+    // Editable global file metadata → InputSource (persisted on save).
+    connect(dock, &SpectrogramControls::fileTitleChanged,
+            this, [this](QString t) { input->setGlobalTitle(t); });
+    connect(dock, &SpectrogramControls::fileDescriptionChanged,
+            this, [this](QString d) { input->setGlobalDescription(d); });
 
     // Connect dock inputs
     connect(dock, &SpectrogramControls::openFile, this, &MainWindow::openFile);
@@ -177,6 +182,9 @@ void MainWindow::openFile(QString fileName)
         if (pendingCenterHz > 0.0) {
             input->setCenterFrequency(pendingCenterHz);
         }
+        // Populate the dock's editable global metadata from the freshly-opened
+        // file (one-shot; setText doesn't re-emit the change signals).
+        dock->setFileInfo(input->globalTitle(), input->globalDescription());
     }
     catch (const std::exception &ex)
     {

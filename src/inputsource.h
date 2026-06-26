@@ -58,6 +58,11 @@ private:
     QJsonObject _originalSigmfRoot;
     bool _wasSigmfInput = false;
     bool _annotationsDirty = false;
+    // Editable global metadata: SigMF core:description (free-text note for the
+    // whole capture) and a non-standard inspectrum:title. Parsed on open,
+    // written back into global on save. Empty when absent.
+    QString _globalDescription;
+    QString _globalTitle;
     // SigMF-archive (tar / tar+zstd) tracking, so saveAnnotations can append an
     // updated .sigmf-meta member back into the container instead of orphaning a
     // sidecar in the decompression cache. _containerPath is the ORIGINAL file
@@ -136,4 +141,14 @@ public:
     bool saveAnnotations(QString *errorOut = nullptr);
     void addAnnotationCallback(AnnotationCallback cb) { _annotCbs.push_back(std::move(cb)); }
     QString sigmfDatatype() const { return _datatype; }
+
+    // Editable global file metadata. Getters return what was parsed on open
+    // (or last set); setters mark the dirty flag and fire the change callbacks
+    // (so the Save button enables) but don't invalidate the render pipeline —
+    // these are text fields, not signal parameters. Persisted into global on
+    // the next saveAnnotations().
+    QString globalDescription() const { return _globalDescription; }
+    QString globalTitle() const { return _globalTitle; }
+    void setGlobalDescription(const QString &text);
+    void setGlobalTitle(const QString &text);
 };
