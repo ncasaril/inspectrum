@@ -93,7 +93,8 @@ inspectrum extracts the chosen region, writes a temporary SigMF segment, and inv
   (relative to sample 0 of the extracted segment). inspectrum maps them to absolute
   file indices: `abs = segStart + core:sample_start`.
 - `core:freq_lower_edge`, `core:freq_upper_edge` — optional, **absolute Hz**. SigMF
-  requires both or neither. If omitted, inspectrum fills both from the tuner pass-band.
+  requires both or neither. If omitted, inspectrum fills both from the tuner pass-band
+  (or, when the tuner is off, the full input band).
 - `core:label`, `core:comment` — optional text (`core:label` <= ~20 chars by SigMF
   convention; `core:comment` is the longer note). Both are shown/editable.
 - `core:description` — optional longer free-form text, mapped to the annotation's
@@ -127,5 +128,5 @@ See `examples/plugins/energy-detect.py` for a complete, ~150-line reference: it 
 the meta path from `argv[-1]` (the last argument, after any fixed `args`),
 `custom_params` from stdin, loads the `cf32` data with
 numpy, energy-gates against the segment peak, and emits one annotation per detected
-burst (omitting freq edges so inspectrum uses the pass-band). Any language works — the
+burst (omitting freq edges so inspectrum uses the pass-band / full input band). Any language works — the
 contract is just argv + stdin + stdout JSON.

@@ -519,6 +519,13 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
         if (errBuf_.size() > kMaxStderrBytes)
             errBuf_ = errBuf_.right(kMaxStderrBytes);
     }
+    // The final drain can push stdout just past the cap; enforce it here too
+    // (can't tail-truncate stdout — that would corrupt the leading JSON).
+    if (outBuf_.size() > kMaxStdoutBytes) {
+        fail(QString("plugin produced too much output (> %1 MiB)")
+                 .arg(kMaxStdoutBytes / (1024 * 1024)));
+        return;
+    }
     const QString errStr = QString::fromUtf8(errBuf_);
 
     if (exitStatus != (int)QProcess::NormalExit) {

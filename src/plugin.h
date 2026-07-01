@@ -136,11 +136,10 @@ public:
              const QJsonObject &customParams,
              int timeoutMs = 120000);
 
-    // running_ alone goes false the instant cancel() is called, but during an
-    // extraction cancel the worker thread is still alive until onExtractFinished()
-    // joins it. busy() stays true across that window so callers (and run()'s own
-    // single-flight guard) can't start a new run and stomp the in-flight one.
-    bool running() const { return running_; }
+    // busy() (not running_) is the single-flight guard: running_ goes false the
+    // instant cancel() is called, but during an extraction cancel the worker thread
+    // is still alive until onExtractFinished() joins it. busy() stays true across
+    // that window so callers can't start a new run and stomp the in-flight one.
     bool busy() const { return running_ || canceling_; }
 
 public slots:
