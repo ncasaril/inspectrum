@@ -124,7 +124,8 @@ tool you run. There is no sandboxing. Only install manifests pointing at code yo
 ## Writing a plugin
 
 See `examples/plugins/energy-detect.py` for a complete, ~150-line reference: it reads
-the meta path from `argv[1]`, `custom_params` from stdin, loads the `cf32` data with
+the meta path from `argv[-1]` (the last argument, after any fixed `args`),
+`custom_params` from stdin, loads the `cf32` data with
 numpy, energy-gates against the segment peak, and emits one annotation per detected
 burst (omitting freq edges so inspectrum uses the pass-band). Any language works — the
 contract is just argv + stdin + stdout JSON.

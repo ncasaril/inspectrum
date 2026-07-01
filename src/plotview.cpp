@@ -1012,7 +1012,7 @@ void PlotView::runPlugin(const PluginManifest &manifest)
         QMessageBox::information(this, "Run plugin", "No file is open.");
         return;
     }
-    if (pluginRunner && pluginRunner->running()) {
+    if (pluginRunner && pluginRunner->busy()) {
         QMessageBox::information(this, "Run plugin",
             "A plugin is already running. Wait for it to finish or cancel it.");
         return;

@@ -353,7 +353,10 @@ void PluginRunner::run(const PluginManifest &manifest,
                        const QJsonObject &customParams,
                        int timeoutMs)
 {
-    if (running_) {
+    if (running_ || canceling_) {
+        // canceling_: a previous run was cancelled mid-extraction and its worker
+        // hasn't been joined yet. Starting now would reset extractCancel_ and delete
+        // tmpDir_ out from under that live worker.
         emit failed("a plugin is already running");
         return;
     }
@@ -428,6 +431,10 @@ void PluginRunner::run(const PluginManifest &manifest,
 void PluginRunner::onExtractFinished()
 {
     if (!extractWatcher_)
+        return;
+    // Defence in depth: ignore a finished() from an orphaned watcher that is no
+    // longer the current one (the busy() guard should already prevent this).
+    if (sender() != nullptr && sender() != extractWatcher_)
         return;
     const SegmentExtract r = extractWatcher_->result();
 

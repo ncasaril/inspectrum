@@ -20,7 +20,8 @@
 """Reference inspectrum analysis plugin: energy-gated burst / call detector.
 
 Contract (see doc/plugins.md):
-  argv[1]  : path to the segment's .sigmf-meta  (cf32_le .sigmf-data alongside it)
+  argv[-1] : path to the segment's .sigmf-meta  (last arg, after any fixed args;
+             cf32_le .sigmf-data alongside it)
   stdin    : JSON { "sample_rate", "center_freq", "custom_params": {...} }
   stdout   : JSON { "annotations": [ {core:sample_start, core:sample_count, ...}, ... ] }
 

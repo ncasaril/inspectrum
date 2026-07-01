@@ -135,7 +135,12 @@ public:
              const QJsonObject &customParams,
              int timeoutMs = 120000);
 
+    // running_ alone goes false the instant cancel() is called, but during an
+    // extraction cancel the worker thread is still alive until onExtractFinished()
+    // joins it. busy() stays true across that window so callers (and run()'s own
+    // single-flight guard) can't start a new run and stomp the in-flight one.
     bool running() const { return running_; }
+    bool busy() const { return running_ || canceling_; }
 
 public slots:
     // Kill the process if running; no signal is emitted for a user cancel.
