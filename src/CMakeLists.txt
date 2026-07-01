@@ -45,6 +45,7 @@ list(APPEND inspectrum_sources
     plot.cpp
     plots.cpp
     plotview.cpp
+    plugin.cpp
     samplebuffer.cpp
     samplesource.cpp
     spectrogramcontrols.cpp

@@ -29,9 +29,15 @@
 #include "cursors.h"
 #include "inputsource.h"
 #include "plot.h"
+#include "plugin.h"
 #include "samplesource.h"
 #include "spectrogramplot.h"
 #include "traceplot.h"
+
+#include <functional>
+
+class QProgressDialog;
+class QMenu;
 
 class PlotView : public QGraphicsView, Subscriber
 {
@@ -40,6 +46,16 @@ class PlotView : public QGraphicsView, Subscriber
 public:
     PlotView(InputSource *input);
     void setSampleRate(double rate);
+    // Run an external analysis plugin over a chosen region of the tuned/filtered
+    // signal and turn its returned annotations into editable annotations. Prompts
+    // for scope (selection / view / whole) and any declared params. Called from the
+    // right-click "Run plugin" submenu and the MainWindow Tools menu.
+    void runPlugin(const PluginManifest &manifest);
+    // Populate `menu` with one action per discovered valid plugin (or a disabled
+    // "no plugins" entry), each wired to call onTrigger with its manifest. Shared by
+    // the right-click submenu and the Tools menu so the two stay in sync.
+    static void buildPluginMenu(QMenu *menu,
+                                const std::function<void(const PluginManifest &)> &onTrigger);
 
 signals:
     void timeSelectionChanged(float time);
@@ -255,4 +271,17 @@ private:
     // Connected to InputSource::setAnnotationCallback in the constructor —
     // handles repaint, dirty title bar, dock save-button enable.
     void onAnnotationsChanged();
+
+    // --- External analysis plugins ---------------------------------------
+    // Ask the user which region to run a plugin over. Fills [start, count) in
+    // absolute samples and returns false if cancelled.
+    bool choosePluginScope(size_t &start, size_t &count);
+    // Build a param dialog from the manifest's declared params; fills `out` with
+    // the entered values (keyed by param key). Returns false if cancelled. With no
+    // declared params it returns true immediately with an empty object.
+    bool collectPluginParams(const PluginManifest &manifest, QJsonObject &out);
+    // One runner reused across runs (single-flight); progress dialog shown while
+    // a run is in flight.
+    PluginRunner *pluginRunner = nullptr;
+    QProgressDialog *pluginProgress = nullptr;
 };

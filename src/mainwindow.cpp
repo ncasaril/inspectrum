@@ -47,6 +47,14 @@ MainWindow::MainWindow()
     plots = new PlotView(input);
     setCentralWidget(plots);
 
+    // The app ships no menu bar of its own; create one here to host external
+    // analysis plugins (Tools → Run plugin ▸ <name>). Rebuilt on each open.
+    QMenu *toolsMenu = menuBar()->addMenu(tr("Tools"));
+    pluginMenu = toolsMenu->addMenu(tr("Run plugin"));
+    toolsMenu->addSeparator();
+    toolsMenu->addAction(tr("Reload plugins"), this, &MainWindow::rebuildPluginMenu);
+    rebuildPluginMenu();
+
     connect(dock, &SpectrogramControls::saveAnnotationsRequested,
             this, &MainWindow::saveAnnotations);
     // Editable global file metadata → InputSource (persisted on save).
@@ -191,6 +199,15 @@ void MainWindow::openFile(QString fileName)
         QMessageBox msgBox(QMessageBox::Critical, "Inspectrum openFile error", QString("%1: %2").arg(fileName).arg(ex.what()));
         msgBox.exec();
     }
+}
+
+void MainWindow::rebuildPluginMenu()
+{
+    if (pluginMenu == nullptr)
+        return;
+    pluginMenu->clear();
+    PlotView::buildPluginMenu(pluginMenu,
+                              [this](const PluginManifest &mf) { plots->runPlugin(mf); });
 }
 
 void MainWindow::invalidateEvent()

@@ -42,9 +42,17 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QWheelEvent>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QPainter>
 #include <QProgressDialog>
@@ -762,6 +770,15 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     );
     menu.addAction(save);
 
+    // Add submenu to run external analysis plugins over a region of the tuned
+    // (filtered) signal. Plugins detect bursts / calls / sync etc. and return
+    // annotations. Discovered fresh each right-click so newly-installed manifests
+    // appear without a restart.
+    {
+        QMenu *pluginMenu = menu.addMenu("Run plugin");
+        buildPluginMenu(pluginMenu, [this](const PluginManifest &mf) { runPlugin(mf); });
+    }
+
     // Annotation actions: edit/delete if the click landed on one, or "Add
     // annotation here" otherwise (only on the spectrogram). The list is
     // accessed via the InputSource so saves and dirty-tracking flow through.
@@ -842,6 +859,235 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         updateView(false);
 }
 
+
+bool PlotView::choosePluginScope(size_t &start, size_t &count)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Run plugin - region");
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel("Run the plugin over:", &dlg));
+
+    auto *selRadio = new QRadioButton("Cursor selection", &dlg);
+    auto *viewRadio = new QRadioButton("Current view", &dlg);
+    auto *wholeRadio = new QRadioButton("Whole file", &dlg);
+    selRadio->setEnabled(cursorsEnabled);
+    if (cursorsEnabled)
+        selRadio->setChecked(true);
+    else
+        viewRadio->setChecked(true);
+    layout->addWidget(selRadio);
+    layout->addWidget(viewRadio);
+    layout->addWidget(wholeRadio);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    if (selRadio->isChecked()) {
+        start = selectedSamples.minimum;
+        count = selectedSamples.length();
+    } else if (viewRadio->isChecked()) {
+        start = viewRange.minimum;
+        count = viewRange.length();
+    } else {
+        start = 0;
+        count = mainSampleSource->count();
+    }
+    return true;
+}
+
+bool PlotView::collectPluginParams(const PluginManifest &manifest, QJsonObject &out)
+{
+    out = QJsonObject();
+    if (manifest.params.isEmpty())
+        return true;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("%1 - parameters").arg(manifest.name));
+    auto *form = new QFormLayout(&dlg);
+
+    struct Field { const PluginParam *p; QWidget *w; };
+    std::vector<Field> fields;
+    for (const auto &p : manifest.params) {
+        QWidget *w = nullptr;
+        if (p.type == "int") {
+            auto *sb = new QSpinBox(&dlg);
+            sb->setRange(p.hasMin ? (int)p.minValue : -1000000000,
+                         p.hasMax ? (int)p.maxValue : 1000000000);
+            sb->setValue(p.defaultValue.toInt());
+            w = sb;
+        } else if (p.type == "float") {
+            auto *sb = new QDoubleSpinBox(&dlg);
+            sb->setDecimals(p.decimals > 0 ? p.decimals : 6);
+            sb->setRange(p.hasMin ? p.minValue : -1e12,
+                         p.hasMax ? p.maxValue : 1e12);
+            sb->setValue(p.defaultValue.toDouble());
+            w = sb;
+        } else if (p.type == "bool") {
+            auto *cb = new QCheckBox(&dlg);
+            cb->setChecked(p.defaultValue.toBool());
+            w = cb;
+        } else if (p.type == "enum") {
+            auto *combo = new QComboBox(&dlg);
+            combo->addItems(p.choices);
+            int idx = p.choices.indexOf(p.defaultValue.toString());
+            if (idx >= 0)
+                combo->setCurrentIndex(idx);
+            w = combo;
+        } else { // string (default)
+            auto *le = new QLineEdit(&dlg);
+            le->setText(p.defaultValue.toString());
+            w = le;
+        }
+        form->addRow(p.label, w);
+        fields.push_back({ &p, w });
+    }
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    for (const auto &f : fields) {
+        const PluginParam &p = *f.p;
+        if (p.type == "int")
+            out.insert(p.key, static_cast<QSpinBox*>(f.w)->value());
+        else if (p.type == "float")
+            out.insert(p.key, static_cast<QDoubleSpinBox*>(f.w)->value());
+        else if (p.type == "bool")
+            out.insert(p.key, static_cast<QCheckBox*>(f.w)->isChecked());
+        else if (p.type == "enum")
+            out.insert(p.key, static_cast<QComboBox*>(f.w)->currentText());
+        else
+            out.insert(p.key, static_cast<QLineEdit*>(f.w)->text());
+    }
+    return true;
+}
+
+void PlotView::buildPluginMenu(QMenu *menu,
+                               const std::function<void(const PluginManifest &)> &onTrigger)
+{
+    int added = 0;
+    for (const auto &m : discoverPlugins()) {
+        if (!m.valid)
+            continue;
+        PluginManifest mf = m;
+        QObject::connect(menu->addAction(mf.name), &QAction::triggered, menu,
+                         [onTrigger, mf]() { onTrigger(mf); });
+        added++;
+    }
+    if (added == 0) {
+        QAction *none = menu->addAction(QObject::tr("No plugins in %1").arg(pluginDirectory()));
+        none->setEnabled(false);
+    }
+}
+
+void PlotView::runPlugin(const PluginManifest &manifest)
+{
+    if (mainSampleSource == nullptr || mainSampleSource->count() == 0) {
+        QMessageBox::information(this, "Run plugin", "No file is open.");
+        return;
+    }
+    if (pluginRunner && pluginRunner->running()) {
+        QMessageBox::information(this, "Run plugin",
+            "A plugin is already running. Wait for it to finish or cancel it.");
+        return;
+    }
+
+    // Source = the tuned/filtered IQ when the tuner is on, else the raw input
+    // (mirrors the "Export samples" behaviour). The pass-band gives default
+    // frequency bounds for annotations that don't specify their own.
+    auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
+    std::shared_ptr<SampleSource<std::complex<float>>> src;
+    double centerFreq, passLo, passHi;
+    if (spectrogramPlot && spectrogramPlot->tunerEnabled()) {
+        src = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(spectrogramPlot->output());
+        const double centre = inputSrc->getFrequency() + spectrogramPlot->tunerOffsetHz();
+        const double half = 0.5 * spectrogramPlot->tunerBandwidthHz();
+        centerFreq = centre;
+        passLo = centre - half;
+        passHi = centre + half;
+    } else {
+        src = spectrogramPlot ? spectrogramPlot->input() : nullptr;
+        centerFreq = inputSrc->getFrequency();
+        passLo = centerFreq - 0.5 * sampleRate;
+        passHi = centerFreq + 0.5 * sampleRate;
+    }
+    if (!src) {
+        QMessageBox::warning(this, "Run plugin", "Could not access the sample source.");
+        return;
+    }
+
+    size_t start = 0, count = 0;
+    if (!choosePluginScope(start, count))
+        return;
+    if (count == 0) {
+        QMessageBox::information(this, "Run plugin", "The chosen region is empty.");
+        return;
+    }
+
+    // Warn before extracting a very large segment (it's written to a temp file
+    // on the GUI thread before the plugin runs).
+    const double bytes = (double)count * sizeof(std::complex<float>);
+    if (bytes > 512.0 * 1024 * 1024) {
+        auto r = QMessageBox::question(this, "Run plugin",
+            QString("This extracts %1 MiB of IQ to a temporary file. Continue?")
+                .arg(bytes / (1024.0 * 1024.0), 0, 'f', 0));
+        if (r != QMessageBox::Yes)
+            return;
+    }
+
+    QJsonObject params;
+    if (!collectPluginParams(manifest, params))
+        return;
+
+    if (!pluginRunner) {
+        pluginRunner = new PluginRunner(this);
+        connect(pluginRunner, &PluginRunner::finished, this,
+            [this](std::vector<Annotation> annos) {
+                if (pluginProgress)
+                    pluginProgress->reset();
+                auto *in = static_cast<InputSource*>(mainSampleSource);
+                for (const auto &a : annos)
+                    in->addAnnotation(a);
+                const QString msg = annos.empty()
+                    ? QStringLiteral("Plugin finished: no annotations returned.")
+                    : QString("Plugin added %1 annotation%2.")
+                          .arg(annos.size()).arg(annos.size() == 1 ? "" : "s");
+                QMessageBox::information(this, "Run plugin", msg);
+            });
+        connect(pluginRunner, &PluginRunner::failed, this,
+            [this](QString err) {
+                if (pluginProgress)
+                    pluginProgress->reset();
+                QMessageBox::warning(this, "Run plugin", "Plugin failed:\n" + err);
+            });
+    }
+
+    if (!pluginProgress) {
+        pluginProgress = new QProgressDialog(this);
+        pluginProgress->setWindowTitle("Run plugin");
+        pluginProgress->setRange(0, 0); // indeterminate / busy
+        pluginProgress->setMinimumDuration(0);
+        pluginProgress->setWindowModality(Qt::WindowModal);
+        connect(pluginProgress, &QProgressDialog::canceled, this, [this]() {
+            if (pluginRunner)
+                pluginRunner->cancel();
+        });
+    }
+    pluginProgress->setLabelText(QString("Running %1...").arg(manifest.name));
+    pluginProgress->show();
+
+    pluginRunner->run(manifest, src, start, count, sampleRate, centerFreq,
+                      passLo, passHi, params);
+}
 
 void PlotView::updateSelectionPlots()
 {
