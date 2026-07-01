@@ -94,9 +94,12 @@ inspectrum extracts the chosen region, writes a temporary SigMF segment, and inv
   file indices: `abs = segStart + core:sample_start`.
 - `core:freq_lower_edge`, `core:freq_upper_edge` — optional, **absolute Hz**. SigMF
   requires both or neither. If omitted, inspectrum fills both from the tuner pass-band.
-- `core:label`, `core:comment` — optional text. (`core:label` ≤ ~20 chars by SigMF
-  convention; `core:comment` is the longer note.)
-- `core:generator`, `core:uuid` — optional, passed through.
+- `core:label`, `core:comment` — optional text (`core:label` <= ~20 chars by SigMF
+  convention; `core:comment` is the longer note). Both are shown/editable.
+- `core:description` — optional longer free-form text, mapped to the annotation's
+  description field (distinct from `core:label`/`core:comment`).
+- `core:generator`, `core:uuid` — optional; accepted but currently ignored (not
+  stored on the annotation, so not re-emitted on save).
 - `presentation:color` — optional `"#RRGGBBAA"`; otherwise a default cyan marks the
   annotation as machine-generated until you edit it.
 

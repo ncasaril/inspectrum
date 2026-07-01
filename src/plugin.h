@@ -20,11 +20,14 @@
 #pragma once
 
 #include <QObject>
+#include <QByteArray>
+#include <QFutureWatcher>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <atomic>
 #include <complex>
 #include <memory>
 #include <vector>
@@ -33,6 +36,14 @@
 class QProcess;
 class QTimer;
 class QTemporaryDir;
+
+// Result of the (worker-thread) segment extraction.
+struct SegmentExtract {
+    bool ok = false;
+    bool canceled = false;
+    QString metaPath;
+    QString error;
+};
 
 // One declared parameter of a plugin (drives the auto-generated param dialog).
 struct PluginParam {
@@ -75,13 +86,16 @@ QVector<PluginManifest> discoverPlugins();
 // Write a temporary SigMF segment (cf32_le .sigmf-data + .sigmf-meta) for samples
 // [start, start+count) pulled from `src`. The meta carries core:sample_rate and
 // captures[0].core:frequency = centerFreq (absolute Hz). Returns false + *errorOut
-// on failure. metaPathOut/dataPathOut may be null.
+// on failure. metaPathOut/dataPathOut may be null. Safe to call off the GUI thread.
+// If `cancel` is non-null and becomes true, the write aborts between chunks,
+// removes the partial data file, and returns false with *errorOut == "canceled".
 bool writeSegmentSigmf(const QString &dir,
                        SampleSource<std::complex<float>> *src,
                        size_t start, size_t count,
                        double sampleRate, double centerFreq,
                        QString *metaPathOut, QString *dataPathOut,
-                       QString *errorOut);
+                       QString *errorOut,
+                       const std::atomic<bool> *cancel = nullptr);
 
 // Parse an IQEngine-style { "annotations": [...] } blob into inspectrum Annotations,
 // mapping segment-local sample indices to absolute file indices (abs = segStart +
@@ -132,20 +146,36 @@ signals:
     void failed(QString error);
 
 private slots:
+    void onExtractFinished();
     void onProcFinished(int exitCode, int exitStatus);
     void onProcErrorOccurred();
+    void onReadyStdout();
+    void onReadyStderr();
     void onTimeout();
 
 private:
     void cleanup();
     void fail(const QString &error);
+    void launchProcess(const QString &metaPath);
 
     QProcess *proc_ = nullptr;
     QTimer *timeoutTimer_ = nullptr;
     std::unique_ptr<QTemporaryDir> tmpDir_;
+    QFutureWatcher<SegmentExtract> *extractWatcher_ = nullptr;
+    std::atomic<bool> extractCancel_{false};
     bool running_ = false;
+    bool canceling_ = false;      // cancel requested while extraction is in flight
+    int timeoutMs_ = 0;
     size_t segStart_ = 0;
     size_t segCount_ = 0;
     double passLo_ = 0.0;
     double passHi_ = 0.0;
+    // Stashed at run() time; used to launch the process once extraction completes.
+    QString exec_;
+    QStringList args_;
+    QByteArray contextJson_;
+    // Incrementally accumulated child output, capped so a runaway plugin can't
+    // exhaust the GUI process's memory.
+    QByteArray outBuf_;
+    QByteArray errBuf_;
 };

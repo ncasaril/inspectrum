@@ -79,7 +79,9 @@ def main():
     if len(sys.argv) < 2:
         sys.stderr.write("usage: energy-detect.py <segment.sigmf-meta>\n")
         return 2
-    meta_path = sys.argv[1]
+    # inspectrum appends the meta path as the LAST argument (after any fixed args),
+    # so read argv[-1] rather than argv[1].
+    meta_path = sys.argv[-1]
 
     # Context (custom params) on stdin; tolerate an empty stdin.
     raw = sys.stdin.read()

@@ -26,6 +26,7 @@
 #include "histogramplot.h"
 #include "util.h"
 #include <QPixmapCache>
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <iostream>
@@ -916,8 +917,15 @@ bool PlotView::collectPluginParams(const PluginManifest &manifest, QJsonObject &
         QWidget *w = nullptr;
         if (p.type == "int") {
             auto *sb = new QSpinBox(&dlg);
-            sb->setRange(p.hasMin ? (int)p.minValue : -1000000000,
-                         p.hasMax ? (int)p.maxValue : 1000000000);
+            // Saturate the (double) manifest bounds into int range before casting;
+            // an out-of-int32 bound would otherwise be an out-of-range double->int
+            // conversion (UB). INT_MIN/INT_MAX are exactly representable as double.
+            auto toIntBound = [](double v) {
+                v = std::max((double)INT_MIN, std::min((double)INT_MAX, v));
+                return (int)v;
+            };
+            sb->setRange(p.hasMin ? toIntBound(p.minValue) : -1000000000,
+                         p.hasMax ? toIntBound(p.maxValue) : 1000000000);
             sb->setValue(p.defaultValue.toInt());
             w = sb;
         } else if (p.type == "float") {
@@ -974,14 +982,23 @@ bool PlotView::collectPluginParams(const PluginManifest &manifest, QJsonObject &
 void PlotView::buildPluginMenu(QMenu *menu,
                                const std::function<void(const PluginManifest &)> &onTrigger)
 {
+    menu->setToolTipsVisible(true);
     int added = 0;
     for (const auto &m : discoverPlugins()) {
         if (!m.valid)
             continue;
         PluginManifest mf = m;
-        QObject::connect(menu->addAction(mf.name), &QAction::triggered, menu,
-                         [onTrigger, mf]() { onTrigger(mf); });
+        QAction *act = menu->addAction(mf.name);
         added++;
+        // The extracted segment is always complex cf32; gate other declared types so
+        // a plugin can't be handed a format it didn't ask for.
+        if (mf.sampleType.compare("cf32", Qt::CaseInsensitive) != 0) {
+            act->setEnabled(false);
+            act->setToolTip(QObject::tr("unsupported sample_type \"%1\" (only cf32)")
+                                .arg(mf.sampleType));
+            continue;
+        }
+        QObject::connect(act, &QAction::triggered, menu, [onTrigger, mf]() { onTrigger(mf); });
     }
     if (added == 0) {
         QAction *none = menu->addAction(QObject::tr("No plugins in %1").arg(pluginDirectory()));
@@ -1033,8 +1050,8 @@ void PlotView::runPlugin(const PluginManifest &manifest)
         return;
     }
 
-    // Warn before extracting a very large segment (it's written to a temp file
-    // on the GUI thread before the plugin runs).
+    // Warn before extracting a very large segment (written to a temp file on a
+    // worker thread before the plugin runs; cancellable from the busy dialog).
     const double bytes = (double)count * sizeof(std::complex<float>);
     if (bytes > 512.0 * 1024 * 1024) {
         auto r = QMessageBox::question(this, "Run plugin",

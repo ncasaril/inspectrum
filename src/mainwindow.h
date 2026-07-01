@@ -50,8 +50,8 @@ protected:
 private:
     void onAnnotationsChanged();
     void refreshWindowTitle();
-    // (Re)populate the Tools → Run plugin menu from the manifests in
-    // ~/.config/inspectrum/plugins. Called at startup and after each open.
+    // (Re)populate the Tools -> Run plugin menu from the manifests in
+    // ~/.config/inspectrum/plugins. Called at startup and from "Reload plugins".
     void rebuildPluginMenu();
 
     SpectrogramControls *dock;

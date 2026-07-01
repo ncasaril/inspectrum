@@ -32,7 +32,14 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QtConcurrent>
 #include <algorithm>
+
+// Bound how much child output we accumulate so a runaway/verbose plugin cannot
+// exhaust the GUI process's memory, and how many annotations one run may add.
+static const int kMaxStdoutBytes = 64 * 1024 * 1024;
+static const int kMaxStderrBytes = 1 * 1024 * 1024;
+static const size_t kMaxAnnotations = 100000;
 
 namespace {
 
@@ -88,6 +95,13 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path)
         m.error = "manifest missing \"exec\"";
         return m;
     }
+    // The child is launched with its working directory set to a fresh temp dir, so a
+    // relative path containing a separator (e.g. "./plugin.py") would resolve against
+    // that empty dir and fail. Resolve such a path against the manifest's own
+    // directory so a script can be colocated with its manifest. Absolute paths and
+    // bare PATH-resolvable names are left untouched.
+    if (QDir::isRelativePath(m.exec) && m.exec.contains('/'))
+        m.exec = QFileInfo(path).absoluteDir().absoluteFilePath(m.exec);
 
     for (const auto &a : root["args"].toArray())
         m.args << a.toString();
@@ -150,7 +164,8 @@ bool writeSegmentSigmf(const QString &dir,
                        size_t start, size_t count,
                        double sampleRate, double centerFreq,
                        QString *metaPathOut, QString *dataPathOut,
-                       QString *errorOut)
+                       QString *errorOut,
+                       const std::atomic<bool> *cancel)
 {
     auto setErr = [&](const QString &e) { if (errorOut) *errorOut = e; };
 
@@ -179,6 +194,12 @@ bool writeSegmentSigmf(const QString &dir,
         }
         const size_t chunk = 1u << 20; // 1 Msample = 8 MiB per pull
         for (size_t off = 0; off < count; off += chunk) {
+            if (cancel && cancel->load()) {
+                setErr("canceled");
+                data.close();
+                data.remove();
+                return false;
+            }
             const size_t n = std::min(chunk, count - off);
             auto buf = src->getSamples(start + off, n);
             if (!buf) {
@@ -229,6 +250,8 @@ bool writeSegmentSigmf(const QString &dir,
         const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
         if (meta.write(json) != json.size()) {
             setErr(QString("short write to %1").arg(metaPath));
+            meta.close();
+            meta.remove();
             return false;
         }
     }
@@ -256,6 +279,11 @@ std::vector<Annotation> parsePluginAnnotations(const QByteArray &json,
 
     const QJsonArray annotations = doc.object()["annotations"].toArray();
     for (const auto &av : annotations) {
+        if (out.size() >= kMaxAnnotations) {
+            qWarning() << "inspectrum: plugin returned more than" << (int)kMaxAnnotations
+                       << "annotations; ignoring the rest";
+            break;
+        }
         QJsonObject a = av.toObject();
         // core:sample_start and core:sample_count are required; skip entries missing
         // either rather than failing the whole batch.
@@ -347,10 +375,24 @@ void PluginRunner::run(const PluginManifest &manifest,
     }
 
     running_ = true;
+    canceling_ = false;
+    extractCancel_ = false;
+    outBuf_.clear();
+    errBuf_.clear();
     segStart_ = start;
     segCount_ = count;   // already clamped to [start, total) above
     passLo_ = passLo;
     passHi_ = passHi;
+    timeoutMs_ = timeoutMs;
+
+    // Stash what launchProcess() needs once extraction completes.
+    exec_ = manifest.exec;
+    args_ = manifest.args;
+    QJsonObject ctx;
+    ctx.insert("sample_rate", sampleRate);
+    ctx.insert("center_freq", centerFreq);
+    ctx.insert("custom_params", customParams);
+    contextJson_ = QJsonDocument(ctx).toJson(QJsonDocument::Compact);
 
     tmpDir_.reset(new QTemporaryDir());
     if (!tmpDir_->isValid()) {
@@ -358,19 +400,54 @@ void PluginRunner::run(const PluginManifest &manifest,
         return;
     }
 
-    QString metaPath, err;
-    if (!writeSegmentSigmf(tmpDir_->path(), src.get(), start, count,
-                           sampleRate, centerFreq, &metaPath, nullptr, &err)) {
-        fail(err.isEmpty() ? "failed to write segment" : err);
+    // Extract the segment on a worker thread so the GUI event loop keeps running
+    // (the busy dialog repaints, Cancel works) even for a whole-file (100GB+) scope.
+    const QString dir = tmpDir_->path();
+    std::atomic<bool> *cancelPtr = &extractCancel_;
+    extractWatcher_ = new QFutureWatcher<SegmentExtract>(this);
+    connect(extractWatcher_, &QFutureWatcher<SegmentExtract>::finished,
+            this, &PluginRunner::onExtractFinished);
+    extractWatcher_->setFuture(QtConcurrent::run(
+        [src, start, count, sampleRate, centerFreq, dir, cancelPtr]() -> SegmentExtract {
+            SegmentExtract r;
+            QString metaPath, err;
+            const bool ok = writeSegmentSigmf(dir, src.get(), start, count,
+                                              sampleRate, centerFreq,
+                                              &metaPath, nullptr, &err, cancelPtr);
+            if (!ok && err == "canceled") {
+                r.canceled = true;
+                return r;
+            }
+            r.ok = ok;
+            r.metaPath = metaPath;
+            r.error = err;
+            return r;
+        }));
+}
+
+void PluginRunner::onExtractFinished()
+{
+    if (!extractWatcher_)
+        return;
+    const SegmentExtract r = extractWatcher_->result();
+
+    // Cancelled (or already terminal) while extracting: the worker has returned, so
+    // it is now safe to delete the temp dir. Emit nothing for a user cancel.
+    if (canceling_ || !running_ || r.canceled) {
+        canceling_ = false;
+        running_ = false;
+        cleanup();
         return;
     }
+    if (!r.ok) {
+        fail(r.error.isEmpty() ? "failed to write segment" : r.error);
+        return;
+    }
+    launchProcess(r.metaPath);
+}
 
-    QJsonObject ctx;
-    ctx.insert("sample_rate", sampleRate);
-    ctx.insert("center_freq", centerFreq);
-    ctx.insert("custom_params", customParams);
-    const QByteArray ctxJson = QJsonDocument(ctx).toJson(QJsonDocument::Compact);
-
+void PluginRunner::launchProcess(const QString &metaPath)
+{
     proc_ = new QProcess(this);
     proc_->setWorkingDirectory(tmpDir_->path());
 
@@ -380,25 +457,48 @@ void PluginRunner::run(const PluginManifest &manifest,
             });
     connect(proc_, &QProcess::errorOccurred,
             this, [this](QProcess::ProcessError) { onProcErrorOccurred(); });
+    connect(proc_, &QProcess::readyReadStandardOutput, this, &PluginRunner::onReadyStdout);
+    connect(proc_, &QProcess::readyReadStandardError, this, &PluginRunner::onReadyStderr);
     // Feed context.json on stdin once the process is up, then signal EOF.
-    connect(proc_, &QProcess::started, this, [this, ctxJson]() {
+    connect(proc_, &QProcess::started, this, [this]() {
         if (proc_) {
-            proc_->write(ctxJson);
+            proc_->write(contextJson_);
             proc_->closeWriteChannel();
         }
     });
 
-    QStringList args = manifest.args;
+    QStringList args = args_;
     args << metaPath;
 
-    if (timeoutMs > 0) {
+    if (timeoutMs_ > 0) {
         timeoutTimer_ = new QTimer(this);
         timeoutTimer_->setSingleShot(true);
         connect(timeoutTimer_, &QTimer::timeout, this, &PluginRunner::onTimeout);
-        timeoutTimer_->start(timeoutMs);
+        timeoutTimer_->start(timeoutMs_);
     }
 
-    proc_->start(manifest.exec, args);
+    proc_->start(exec_, args);
+}
+
+void PluginRunner::onReadyStdout()
+{
+    if (!proc_)
+        return;
+    outBuf_.append(proc_->readAllStandardOutput());
+    if (outBuf_.size() > kMaxStdoutBytes) {
+        proc_->kill();
+        fail(QString("plugin produced too much output (> %1 MiB)")
+                 .arg(kMaxStdoutBytes / (1024 * 1024)));
+    }
+}
+
+void PluginRunner::onReadyStderr()
+{
+    if (!proc_)
+        return;
+    errBuf_.append(proc_->readAllStandardError());
+    if (errBuf_.size() > kMaxStderrBytes)
+        errBuf_.truncate(kMaxStderrBytes); // keep the head, stay bounded
 }
 
 void PluginRunner::onProcFinished(int exitCode, int exitStatus)
@@ -406,28 +506,36 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
     if (!running_)
         return;
 
-    QByteArray out = proc_ ? proc_->readAllStandardOutput() : QByteArray();
-    QByteArray errOut = proc_ ? proc_->readAllStandardError() : QByteArray();
+    if (proc_) {
+        outBuf_.append(proc_->readAllStandardOutput());
+        errBuf_.append(proc_->readAllStandardError());
+    }
+    const QString errStr = QString::fromUtf8(errBuf_);
 
     if (exitStatus != (int)QProcess::NormalExit) {
-        fail(QString("plugin crashed%1")
-                 .arg(errOut.isEmpty() ? QString() : ":\n" + QString::fromUtf8(errOut)));
+        fail(QString("plugin crashed%1").arg(errStr.isEmpty() ? QString() : ":\n" + errStr));
         return;
     }
     if (exitCode != 0) {
         fail(QString("plugin exited with code %1%2")
-                 .arg(exitCode)
-                 .arg(errOut.isEmpty() ? QString() : ":\n" + QString::fromUtf8(errOut)));
+                 .arg(exitCode).arg(errStr.isEmpty() ? QString() : ":\n" + errStr));
+        return;
+    }
+
+    // A clean exit with no stdout is a zero-detection run, not a parse failure.
+    if (outBuf_.trimmed().isEmpty()) {
+        running_ = false;
+        cleanup();
+        emit finished({});
         return;
     }
 
     QString perr;
     std::vector<Annotation> annos =
-        parsePluginAnnotations(out, segStart_, segCount_, passLo_, passHi_, &perr);
+        parsePluginAnnotations(outBuf_, segStart_, segCount_, passLo_, passHi_, &perr);
     if (!perr.isEmpty()) {
         fail(QString("could not parse plugin output: %1%2")
-                 .arg(perr)
-                 .arg(errOut.isEmpty() ? QString() : "\n" + QString::fromUtf8(errOut)));
+                 .arg(perr).arg(errStr.isEmpty() ? QString() : "\n" + errStr));
         return;
     }
 
@@ -459,13 +567,20 @@ void PluginRunner::cancel()
 {
     if (!running_)
         return;
-    // running_=false + cleanup() (which disconnect()s proc_ before deleteLater)
-    // suppresses the finished()/failed() that the killed process would otherwise
-    // trigger, so no explicit "canceled" flag is needed.
-    running_ = false;
-    if (proc_)
+    extractCancel_ = true; // ask any in-flight extraction worker to stop
+    if (proc_) {
+        // Process phase: killing it + cleanup() (which disconnects before deleteLater)
+        // suppresses the finished()/failed() the kill would otherwise trigger.
+        running_ = false;
         proc_->kill();
-    cleanup();
+        cleanup();
+    } else {
+        // Extraction phase: the worker may still be writing tmpDir_, so we cannot
+        // delete it yet. Mark cancelling and let onExtractFinished() tidy up once the
+        // worker observes extractCancel_ and returns.
+        canceling_ = true;
+        running_ = false;
+    }
 }
 
 void PluginRunner::fail(const QString &error)
@@ -473,6 +588,7 @@ void PluginRunner::fail(const QString &error)
     if (!running_)
         return;
     running_ = false;
+    canceling_ = false;
     cleanup();
     emit failed(error);
 }
@@ -483,6 +599,16 @@ void PluginRunner::cleanup()
         timeoutTimer_->stop();
         timeoutTimer_->deleteLater();
         timeoutTimer_ = nullptr;
+    }
+    if (extractWatcher_) {
+        // Make sure no worker is still touching tmpDir_ before we remove it. If the
+        // future already finished (the common case) this returns immediately;
+        // otherwise extractCancel_ makes the worker bail at the next chunk.
+        extractCancel_ = true;
+        extractWatcher_->waitForFinished();
+        extractWatcher_->disconnect(this);
+        extractWatcher_->deleteLater();
+        extractWatcher_ = nullptr;
     }
     if (proc_) {
         proc_->disconnect(this);

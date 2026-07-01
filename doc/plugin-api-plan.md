@@ -146,10 +146,11 @@ one `PlotView::runPlugin(const PluginManifest&)`:
   `!cursorsEnabled`; mirrors the export dialog's three-way pattern at
   `plotview.cpp:1417-1427`), then the auto-generated param dialog if the manifest
   declares `params`.
-- Async run via **`QProcess`** (already async — no `QtConcurrent` needed) with a
-  busy `QProgressDialog` + **Cancel** (kills the process) and a timeout `QTimer`;
-  a single-flight guard refuses overlapping runs. Segment extraction is on the GUI
-  thread (bounded by the scope; size-warned) — the slow part is the plugin itself.
+- Async run: segment extraction runs on a **`QtConcurrent`** worker (with a
+  `QFutureWatcher` + an atomic cancel flag), and the **`QProcess`** it feeds is itself
+  async, so the GUI event loop stays live throughout — the busy `QProgressDialog` +
+  **Cancel** aborts both the extraction and the process, backed by a timeout `QTimer`.
+  A single-flight guard refuses overlapping runs; large scopes are size-warned.
 - Returned annotations are added via the existing `addAnnotation()` path, so they are
   immediately editable (drag handles), dirty-tracked, and savable to SigMF / archive.
   Default box colour for auto-detected annotations is a distinct cyan so they read as

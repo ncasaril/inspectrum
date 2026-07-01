@@ -48,7 +48,8 @@ MainWindow::MainWindow()
     setCentralWidget(plots);
 
     // The app ships no menu bar of its own; create one here to host external
-    // analysis plugins (Tools → Run plugin ▸ <name>). Rebuilt on each open.
+    // analysis plugins (Tools -> Run plugin -> <name>). Built at startup and
+    // refreshed via "Reload plugins" (the right-click submenu rediscovers on its own).
     QMenu *toolsMenu = menuBar()->addMenu(tr("Tools"));
     pluginMenu = toolsMenu->addMenu(tr("Run plugin"));
     toolsMenu->addSeparator();
