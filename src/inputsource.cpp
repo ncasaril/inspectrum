@@ -27,6 +27,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <ctime>
 #include <vector>
 
 #include <QFileInfo>
@@ -265,7 +266,12 @@ static std::vector<TarEntry> parseTar(const uchar *data, qint64 totalSize)
         const char *hdr = reinterpret_cast<const char*>(data + pos);
         bool allZero = true;
         for (int i = 0; i < 512; ++i) { if (hdr[i]) { allZero = false; break; } }
-        if (allZero) break;
+        // A zero block is the end-of-archive marker. We DON'T stop here:
+        // inspectrum appends updated .sigmf-meta members as extra tar fragments
+        // past this marker (see appendMetaToArchive), so skip the padding and
+        // keep scanning. A genuinely truncated archive just runs out of blocks
+        // and the loop ends; a bad size field below still bails out.
+        if (allZero) { pos += 512; continue; }
 
         // Name: 100 bytes, null-terminated; use memchr to stay within the field
         const char *nul = static_cast<const char*>(memchr(hdr, 0, 100));
@@ -483,6 +489,11 @@ QJsonObject InputSource::parseMetaDocument(const QByteArray &bytes)
     }
     _datatype = datatype;
 
+    // Editable global metadata. core:description is the standard free-text
+    // note; inspectrum:title is our non-standard short name.
+    _globalDescription = global["core:description"].toString();
+    _globalTitle = global["inspectrum:title"].toString();
+
     if (global.contains("core:sample_rate") && global["core:sample_rate"].isDouble()) {
         setSampleRate(global["core:sample_rate"].toDouble());
     }
@@ -536,8 +547,12 @@ QJsonObject InputSource::parseMetaDocument(const QByteArray &bytes)
                 auto comment = sigmf_annotation["core:comment"].toString();
 
                 auto sigmf_color = sigmf_annotation["presentation:color"].toString();
-                // SigMF uses the format "#RRGGBBAA" for alpha-channel colors, QT uses "#AARRGGBB"
-                if ((sigmf_color.at(0) == '#') && (sigmf_color.length()) == 9) {
+                // SigMF uses the format "#RRGGBBAA" for alpha-channel colors, QT uses "#AARRGGBB".
+                // Test length first: an annotation may carry no presentation:color (then
+                // toString() is empty), and at(0) on an empty QString is out of bounds —
+                // a latent crash in debug builds / UB in release. && short-circuits so
+                // at(0) only runs once we know there are 9 chars.
+                if ((sigmf_color.length() == 9) && (sigmf_color.at(0) == '#')) {
                     sigmf_color = "#" + sigmf_color.mid(7,2) + sigmf_color.mid(1,6);
                 }
                 auto boxColor = QString::fromStdString("white");
@@ -655,8 +670,20 @@ bool InputSource::openSigmfArchive(const uchar *data, qint64 size)
     QByteArray metaBytes(reinterpret_cast<const char*>(data + metaEntry->dataOffset),
                          static_cast<int>(metaEntry->size));
     // parseMetaDocument picks the sample adapter and sets sampleRate /
-    // frequency / annotations exactly as the .sigmf-* pair path does.
+    // frequency / annotations exactly as the .sigmf-* pair path does. Because
+    // parseTar reads through EOF padding, metaEntry is the LAST .sigmf-meta in
+    // the archive — i.e. the newest appended update wins automatically.
     parseMetaDocument(metaBytes);
+
+    // Remember enough to append an updated meta later: the full parsed root (so
+    // unrelated keys round-trip) and the meta member's name (reused so the
+    // appended member reads as an update of the same file).
+    _isArchive = true;
+    _archiveMetaName = metaEntry->name;
+    QJsonParseError perr;
+    QJsonDocument doc = QJsonDocument::fromJson(metaBytes, &perr);
+    _originalSigmfRoot = (perr.error == QJsonParseError::NoError && doc.isObject())
+                             ? doc.object() : QJsonObject();
 
     dataOffset = static_cast<size_t>(dataEntry->dataOffset);
     sampleCount = dataEntry->size / sampleAdapter->sampleSize();
@@ -664,6 +691,37 @@ bool InputSource::openSigmfArchive(const uchar *data, qint64 size)
 }
 
 void InputSource::openFile(const char *filename)
+{
+    // Reset the SigMF-archive tracking once for the whole open. openFileImpl
+    // recurses for transparent zstd, and an inner frame must be able to see the
+    // _containerPath / _archiveZstd the outer (zstd) frame set — so the reset
+    // lives here, not in openFileImpl.
+    _isArchive = false;
+    _archiveZstd = false;
+    _containerPath.clear();
+    _archiveMetaName.clear();
+    _globalDescription.clear();
+    _globalTitle.clear();
+    openFileImpl(filename);
+}
+
+void InputSource::setGlobalDescription(const QString &text)
+{
+    if (_globalDescription == text) return;
+    _globalDescription = text;
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+}
+
+void InputSource::setGlobalTitle(const QString &text)
+{
+    if (_globalTitle == text) return;
+    _globalTitle = text;
+    _annotationsDirty = true;
+    for (auto &cb : _annotCbs) if (cb) cb();
+}
+
+void InputSource::openFileImpl(const char *filename)
 {
     QFileInfo fileInfo(filename);
     _filePath = fileInfo.absoluteFilePath();
@@ -693,7 +751,13 @@ void InputSource::openFile(const char *filename)
     // set, since that names the raw layout of `filename` itself.
     if (_fmt.empty() && fileInfo.suffix().compare("zst", Qt::CaseInsensitive) == 0) {
         QString decompressed = decompressZstToCache(fileInfo);
-        openFile(decompressed.toUtf8().constData());
+        // Remember the ORIGINAL compressed container so a later save appends an
+        // updated meta frame here, not beside the decompression-cache temp that
+        // _filePath is about to point at. Recurse via openFileImpl so this
+        // survives (openFile would reset it).
+        _containerPath = fileInfo.absoluteFilePath();
+        _archiveZstd = true;
+        openFileImpl(decompressed.toUtf8().constData());
         return;
     }
 
@@ -831,6 +895,11 @@ void InputSource::openFile(const char *filename)
         }
 
         if (handled) {
+            // For a directly-opened (uncompressed) archive, this file IS the
+            // append target. When we got here via the zstd branch, _containerPath
+            // already points at the .zst and must be left alone.
+            if (_containerPath.isEmpty())
+                _containerPath = fileInfo.absoluteFilePath();
             cleanup();
             inputFile = file.release();
             mmapData = data;
@@ -971,6 +1040,123 @@ bool InputSource::removeAnnotation(int index)
     return true;
 }
 
+// Write a classic ustar numeric field: `len-1` zero-padded octal digits then a
+// NUL terminator. Oversized values keep their least-significant digits (never
+// happens for our small metas, but stays in-bounds if it ever did).
+static void writeTarOctal(char *field, int len, qulonglong val)
+{
+    QByteArray s = QByteArray::number(val, 8);
+    if (s.size() > len - 1)
+        s = s.right(len - 1);
+    s = s.rightJustified(len - 1, '0');
+    memcpy(field, s.constData(), len - 1);
+    field[len - 1] = '\0';
+}
+
+// Build a single ustar tar member (512-byte header + content padded to a
+// 512-byte boundary) for `name` carrying `content`. No EOF blocks — the caller
+// appends those once after the member.
+static QByteArray buildTarMember(const QByteArray &name, const QByteArray &content)
+{
+    QByteArray block(512, '\0');
+    char *h = block.data();
+    int n = std::min(name.size(), 100);
+    memcpy(h, name.constData(), n);
+    writeTarOctal(h + 100, 8, 0644);                                   // mode
+    writeTarOctal(h + 108, 8, 0);                                      // uid
+    writeTarOctal(h + 116, 8, 0);                                      // gid
+    writeTarOctal(h + 124, 12, (qulonglong)content.size());           // size
+    writeTarOctal(h + 136, 12, (qulonglong)time(nullptr));            // mtime
+    memset(h + 148, ' ', 8);                                          // chksum field = spaces while summing
+    h[156] = '0';                                                     // typeflag: regular file
+    memcpy(h + 257, "ustar", 5);                                      // magic (262 stays NUL)
+    h[263] = '0'; h[264] = '0';                                       // version "00"
+    unsigned int sum = 0;
+    for (int i = 0; i < 512; ++i) sum += (unsigned char)h[i];
+    QByteArray cs = QByteArray::number((qulonglong)sum, 8).rightJustified(6, '0');
+    memcpy(h + 148, cs.constData(), 6);
+    h[154] = '\0';
+    h[155] = ' ';
+
+    QByteArray member = block;
+    member.append(content);
+    int pad = (512 - (content.size() % 512)) % 512;
+    if (pad) member.append(QByteArray(pad, '\0'));
+    return member;
+}
+
+bool InputSource::appendMetaToArchive(const QJsonObject &root, QString *errorOut)
+{
+    if (_containerPath.isEmpty()) {
+        if (errorOut) *errorOut = "No archive container path is known for this input.";
+        return false;
+    }
+
+    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
+
+    // Reuse the original meta member name so the appended entry reads as an
+    // update of the same file; fall back to "<base>.sigmf-meta" if unknown or
+    // too long for the 100-byte ustar name field.
+    QByteArray memberName = _archiveMetaName.toUtf8();
+    if (memberName.isEmpty() || memberName.size() > 100) {
+        memberName = QFileInfo(_containerPath).baseName().toUtf8() + ".sigmf-meta";
+        if (memberName.size() > 100)
+            memberName = QByteArrayLiteral("inspectrum.sigmf-meta");
+    }
+
+    // tar fragment: the member followed by the two-block end-of-archive marker,
+    // so the appended bytes are themselves a well-formed archive tail.
+    QByteArray fragment = buildTarMember(memberName, json);
+    fragment.append(QByteArray(1024, '\0'));
+
+    QByteArray payload;
+    if (_archiveZstd) {
+#ifdef HAVE_ZSTD
+        // Compress the fragment as one independent zstd frame and append it.
+        // zstd frames concatenate, so the existing streaming decompressor
+        // inflates [original frames][this frame] as one continuous tar.
+        size_t bound = ZSTD_compressBound((size_t)fragment.size());
+        payload.resize((int)bound);
+        size_t csz = ZSTD_compress(payload.data(), bound,
+                                   fragment.constData(), (size_t)fragment.size(), 19);
+        if (ZSTD_isError(csz)) {
+            if (errorOut) *errorOut = QStringLiteral("zstd compress failed: %1")
+                                          .arg(ZSTD_getErrorName(csz));
+            return false;
+        }
+        payload.resize((int)csz);
+#else
+        if (errorOut) *errorOut = "This build has no zstd support; cannot update a .zst archive.";
+        return false;
+#endif
+    } else {
+        payload = fragment;
+    }
+
+    // Append-only. The original bytes are never modified, so a failed or partial
+    // write is undone by truncating back to the pre-append size.
+    const qint64 origSize = QFileInfo(_containerPath).size();
+    QFile f(_containerPath);
+    if (!f.open(QIODevice::Append)) {
+        if (errorOut) *errorOut = "Could not open " + _containerPath + " for appending: " + f.errorString();
+        return false;
+    }
+    bool ok = (f.write(payload) == (qint64)payload.size()) && f.flush();
+    QString werr = f.errorString();
+    f.close();
+    if (!ok) {
+        QFile::resize(_containerPath, origSize); // discard any partial append
+        if (errorOut) *errorOut = "Append failed (rolled back): " + werr;
+        return false;
+    }
+
+    // The appended member is now the authority; round-trip against it next save.
+    _originalSigmfRoot = root;
+    _annotationsDirty = false;
+    for (auto &cb : _annotCbs) if (cb) cb();
+    return true;
+}
+
 bool InputSource::saveAnnotations(QString *errorOut)
 {
     if (_filePath.isEmpty()) {
@@ -994,7 +1180,7 @@ bool InputSource::saveAnnotations(QString *errorOut)
         annotations.append(annotationToJson(a));
 
     QJsonObject root;
-    if (_wasSigmfInput && !_originalSigmfRoot.isEmpty()) {
+    if ((_wasSigmfInput || _isArchive) && !_originalSigmfRoot.isEmpty()) {
         // Round-trip every other key the original meta had; only annotations
         // gets replaced. This avoids losing custom captures, hardware tags,
         // extension keys, etc.
@@ -1019,6 +1205,25 @@ bool InputSource::saveAnnotations(QString *errorOut)
         root.insert("captures", captures);
         root.insert("annotations", annotations);
     }
+
+    // Fold the editable global metadata into global. Only write non-empty
+    // values so we don't clobber a synthesized description or litter the file
+    // with empty keys.
+    {
+        QJsonObject g = root["global"].toObject();
+        if (!_globalDescription.isEmpty())
+            g.insert("core:description", _globalDescription);
+        if (!_globalTitle.isEmpty())
+            g.insert("inspectrum:title", _globalTitle);
+        root.insert("global", g);
+    }
+
+    // SigMF archive (tar / tar+zstd): append an updated .sigmf-meta member back
+    // into the container instead of writing a sidecar into the decompression
+    // cache (where _filePath points for a .zst). The newest member wins on the
+    // next open.
+    if (_isArchive)
+        return appendMetaToArchive(root, errorOut);
 
     QFile out(metaPath);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {

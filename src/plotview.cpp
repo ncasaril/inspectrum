@@ -18,6 +18,7 @@
  */
 
 #include "plotview.h"
+#include "amplitudedemod.h"
 #include "annotationdialog.h"
 #include "frequencydemod.h"
 #include "fskdemod.h"
@@ -25,6 +26,7 @@
 #include "histogramplot.h"
 #include "util.h"
 #include <QPixmapCache>
+#include <algorithm>
 #include <climits>
 #include <cmath>
 #include <iostream>
@@ -41,9 +43,17 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QWheelEvent>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QPainter>
 #include <QProgressDialog>
@@ -253,6 +263,34 @@ void PlotView::setFmSquelch(int pct)
     if (periodTimer) periodTimer->start();
 }
 
+// Switch every AM (AmplitudeDemod) plot between linear power and dB.
+void PlotView::setAmDbMode(bool on)
+{
+    amDbMode = on;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get()))
+                am->setDbMode(on);
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
+// Full-scale reference (dBm) added to AM plots in dB mode. 0 = dBFS.
+void PlotView::setAmReferenceLevel(double dbm)
+{
+    amRefLevelDbm = dbm;
+    for (auto &plt : plots) {
+        if (auto tp = dynamic_cast<TracePlot*>(plt.get())) {
+            if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get()))
+                am->setReferenceLevelDbm(dbm);
+        }
+    }
+    QPixmapCache::clear();
+    viewport()->update();
+}
+
 void PlotView::autoTuneFmLpf()
 {
     if (!spectrogramPlot || sampleRate <= 0.0) return;
@@ -455,6 +493,10 @@ void PlotView::addPlot(Plot *plot)
             fsk->setPredemodDecimation(fmPredemodDecim);
             fsk->setCheapDemod(fmFastDemod);
         }
+        if (auto am = dynamic_cast<AmplitudeDemod*>(tp->source().get())) {
+            am->setDbMode(amDbMode);
+            am->setReferenceLevelDbm(amRefLevelDbm);
+        }
     }
     if (auto fskp = dynamic_cast<FskPolarPlot*>(plot)) {
         fskp->setSymbolRate(symbolRateHz);
@@ -550,6 +592,14 @@ QString PlotView::sampleValueText(Plot *plot, size_t sampleIdx, double *rawValue
         if (dynamic_cast<FrequencyDemod*>(src.get())) {
             return QStringLiteral("%1Hz")
                 .arg(QString::fromStdString(formatSIValue(v)));
+        }
+        // AM in dB mode reads in dBFS, or dBm once a full-scale reference is
+        // set (ref 0 = dBFS by convention).
+        if (auto am = dynamic_cast<AmplitudeDemod*>(src.get())) {
+            if (am->dbMode()) {
+                const char *unit = (am->referenceLevelDbm() != 0.0) ? " dBm" : " dBFS";
+                return QString::number(v, 'f', 1) + QLatin1String(unit);
+            }
         }
         return QString::number(v, 'g', 6);
     }
@@ -721,6 +771,15 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     );
     menu.addAction(save);
 
+    // Add submenu to run external analysis plugins over a region of the tuned
+    // (filtered) signal. Plugins detect bursts / calls / sync etc. and return
+    // annotations. Discovered fresh each right-click so newly-installed manifests
+    // appear without a restart.
+    {
+        QMenu *pluginMenu = menu.addMenu("Run plugin");
+        buildPluginMenu(pluginMenu, [this](const PluginManifest &mf) { runPlugin(mf); });
+    }
+
     // Annotation actions: edit/delete if the click landed on one, or "Add
     // annotation here" otherwise (only on the spectrogram). The list is
     // accessed via the InputSource so saves and dirty-tracking flow through.
@@ -801,6 +860,251 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         updateView(false);
 }
 
+
+bool PlotView::choosePluginScope(size_t &start, size_t &count)
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Run plugin - region");
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel("Run the plugin over:", &dlg));
+
+    auto *selRadio = new QRadioButton("Cursor selection", &dlg);
+    auto *viewRadio = new QRadioButton("Current view", &dlg);
+    auto *wholeRadio = new QRadioButton("Whole file", &dlg);
+    selRadio->setEnabled(cursorsEnabled);
+    if (cursorsEnabled)
+        selRadio->setChecked(true);
+    else
+        viewRadio->setChecked(true);
+    layout->addWidget(selRadio);
+    layout->addWidget(viewRadio);
+    layout->addWidget(wholeRadio);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    if (selRadio->isChecked()) {
+        start = selectedSamples.minimum;
+        count = selectedSamples.length();
+    } else if (viewRadio->isChecked()) {
+        start = viewRange.minimum;
+        count = viewRange.length();
+    } else {
+        start = 0;
+        count = mainSampleSource->count();
+    }
+    return true;
+}
+
+bool PlotView::collectPluginParams(const PluginManifest &manifest, QJsonObject &out)
+{
+    out = QJsonObject();
+    if (manifest.params.isEmpty())
+        return true;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("%1 - parameters").arg(manifest.name));
+    auto *form = new QFormLayout(&dlg);
+
+    struct Field { const PluginParam *p; QWidget *w; };
+    std::vector<Field> fields;
+    for (const auto &p : manifest.params) {
+        QWidget *w = nullptr;
+        if (p.type == "int") {
+            auto *sb = new QSpinBox(&dlg);
+            // Saturate the (double) manifest bounds into int range before casting;
+            // an out-of-int32 bound would otherwise be an out-of-range double->int
+            // conversion (UB). INT_MIN/INT_MAX are exactly representable as double.
+            auto toIntBound = [](double v) {
+                v = std::max((double)INT_MIN, std::min((double)INT_MAX, v));
+                return (int)v;
+            };
+            sb->setRange(p.hasMin ? toIntBound(p.minValue) : -1000000000,
+                         p.hasMax ? toIntBound(p.maxValue) : 1000000000);
+            sb->setValue(p.defaultValue.toInt());
+            w = sb;
+        } else if (p.type == "float") {
+            auto *sb = new QDoubleSpinBox(&dlg);
+            sb->setDecimals(p.decimals > 0 ? p.decimals : 6);
+            sb->setRange(p.hasMin ? p.minValue : -1e12,
+                         p.hasMax ? p.maxValue : 1e12);
+            sb->setValue(p.defaultValue.toDouble());
+            w = sb;
+        } else if (p.type == "bool") {
+            auto *cb = new QCheckBox(&dlg);
+            cb->setChecked(p.defaultValue.toBool());
+            w = cb;
+        } else if (p.type == "enum") {
+            auto *combo = new QComboBox(&dlg);
+            combo->addItems(p.choices);
+            int idx = p.choices.indexOf(p.defaultValue.toString());
+            if (idx >= 0)
+                combo->setCurrentIndex(idx);
+            w = combo;
+        } else { // string (default)
+            auto *le = new QLineEdit(&dlg);
+            le->setText(p.defaultValue.toString());
+            w = le;
+        }
+        form->addRow(p.label, w);
+        fields.push_back({ &p, w });
+    }
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    for (const auto &f : fields) {
+        const PluginParam &p = *f.p;
+        if (p.type == "int")
+            out.insert(p.key, static_cast<QSpinBox*>(f.w)->value());
+        else if (p.type == "float")
+            out.insert(p.key, static_cast<QDoubleSpinBox*>(f.w)->value());
+        else if (p.type == "bool")
+            out.insert(p.key, static_cast<QCheckBox*>(f.w)->isChecked());
+        else if (p.type == "enum")
+            out.insert(p.key, static_cast<QComboBox*>(f.w)->currentText());
+        else
+            out.insert(p.key, static_cast<QLineEdit*>(f.w)->text());
+    }
+    return true;
+}
+
+void PlotView::buildPluginMenu(QMenu *menu,
+                               const std::function<void(const PluginManifest &)> &onTrigger)
+{
+    menu->setToolTipsVisible(true);
+    int added = 0;
+    for (const auto &m : discoverPlugins()) {
+        if (!m.valid)
+            continue;
+        PluginManifest mf = m;
+        QAction *act = menu->addAction(mf.name);
+        added++;
+        // The extracted segment is always complex cf32; gate other declared types so
+        // a plugin can't be handed a format it didn't ask for.
+        if (mf.sampleType.compare("cf32", Qt::CaseInsensitive) != 0) {
+            act->setEnabled(false);
+            act->setToolTip(QObject::tr("unsupported sample_type \"%1\" (only cf32)")
+                                .arg(mf.sampleType));
+            continue;
+        }
+        QObject::connect(act, &QAction::triggered, menu, [onTrigger, mf]() { onTrigger(mf); });
+    }
+    if (added == 0) {
+        QAction *none = menu->addAction(QObject::tr("No plugins in %1").arg(pluginDirectory()));
+        none->setEnabled(false);
+    }
+}
+
+void PlotView::runPlugin(const PluginManifest &manifest)
+{
+    if (mainSampleSource == nullptr || mainSampleSource->count() == 0) {
+        QMessageBox::information(this, "Run plugin", "No file is open.");
+        return;
+    }
+    if (pluginRunner && pluginRunner->busy()) {
+        QMessageBox::information(this, "Run plugin",
+            "A plugin is already running. Wait for it to finish or cancel it.");
+        return;
+    }
+
+    // Source = the tuned/filtered IQ when the tuner is on, else the raw input
+    // (mirrors the "Export samples" behaviour). The pass-band gives default
+    // frequency bounds for annotations that don't specify their own.
+    auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
+    std::shared_ptr<SampleSource<std::complex<float>>> src;
+    double centerFreq, passLo, passHi;
+    if (spectrogramPlot && spectrogramPlot->tunerEnabled()) {
+        src = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(spectrogramPlot->output());
+        const double centre = inputSrc->getFrequency() + spectrogramPlot->tunerOffsetHz();
+        const double half = 0.5 * spectrogramPlot->tunerBandwidthHz();
+        centerFreq = centre;
+        passLo = centre - half;
+        passHi = centre + half;
+    } else {
+        src = spectrogramPlot ? spectrogramPlot->input() : nullptr;
+        centerFreq = inputSrc->getFrequency();
+        passLo = centerFreq - 0.5 * sampleRate;
+        passHi = centerFreq + 0.5 * sampleRate;
+    }
+    if (!src) {
+        QMessageBox::warning(this, "Run plugin", "Could not access the sample source.");
+        return;
+    }
+
+    size_t start = 0, count = 0;
+    if (!choosePluginScope(start, count))
+        return;
+    if (count == 0) {
+        QMessageBox::information(this, "Run plugin", "The chosen region is empty.");
+        return;
+    }
+
+    // Warn before extracting a very large segment (written to a temp file on a
+    // worker thread before the plugin runs; cancellable from the busy dialog).
+    const double bytes = (double)count * sizeof(std::complex<float>);
+    if (bytes > 512.0 * 1024 * 1024) {
+        auto r = QMessageBox::question(this, "Run plugin",
+            QString("This extracts %1 MiB of IQ to a temporary file. Continue?")
+                .arg(bytes / (1024.0 * 1024.0), 0, 'f', 0));
+        if (r != QMessageBox::Yes)
+            return;
+    }
+
+    QJsonObject params;
+    if (!collectPluginParams(manifest, params))
+        return;
+
+    if (!pluginRunner) {
+        pluginRunner = new PluginRunner(this);
+        connect(pluginRunner, &PluginRunner::finished, this,
+            [this](std::vector<Annotation> annos) {
+                if (pluginProgress)
+                    pluginProgress->reset();
+                auto *in = static_cast<InputSource*>(mainSampleSource);
+                for (const auto &a : annos)
+                    in->addAnnotation(a);
+                const QString msg = annos.empty()
+                    ? QStringLiteral("Plugin finished: no annotations returned.")
+                    : QString("Plugin added %1 annotation%2.")
+                          .arg(annos.size()).arg(annos.size() == 1 ? "" : "s");
+                QMessageBox::information(this, "Run plugin", msg);
+            });
+        connect(pluginRunner, &PluginRunner::failed, this,
+            [this](QString err) {
+                if (pluginProgress)
+                    pluginProgress->reset();
+                QMessageBox::warning(this, "Run plugin", "Plugin failed:\n" + err);
+            });
+    }
+
+    if (!pluginProgress) {
+        pluginProgress = new QProgressDialog(this);
+        pluginProgress->setWindowTitle("Run plugin");
+        pluginProgress->setRange(0, 0); // indeterminate / busy
+        pluginProgress->setMinimumDuration(0);
+        pluginProgress->setWindowModality(Qt::WindowModal);
+        connect(pluginProgress, &QProgressDialog::canceled, this, [this]() {
+            if (pluginRunner)
+                pluginRunner->cancel();
+        });
+    }
+    pluginProgress->setLabelText(QString("Running %1...").arg(manifest.name));
+    pluginProgress->show();
+
+    pluginRunner->run(manifest, src, start, count, sampleRate, centerFreq,
+                      passLo, passHi, params);
+}
 
 void PlotView::updateSelectionPlots()
 {
@@ -935,21 +1239,223 @@ void PlotView::onAnnotationsChanged()
     viewport()->update();
 }
 
+QRect PlotView::annotationViewportRect(const Annotation &a)
+{
+    if (!spectrogramPlot) return QRect();
+    const int hscroll = horizontalScrollBar()->value();
+    const int vscroll = verticalScrollBar()->value();
+    const int x0 = sampleToColumn(a.sampleRange.minimum) - hscroll;
+    const int x1 = sampleToColumn(a.sampleRange.maximum) - hscroll;
+    // Higher frequency = smaller y, so freqMax is the top edge.
+    const int yTop = spectrogramPlot->plotYAtFreq(a.frequencyRange.maximum) - vscroll;
+    const int yBot = spectrogramPlot->plotYAtFreq(a.frequencyRange.minimum) - vscroll;
+    return QRect(QPoint(x0, yTop), QPoint(x1, yBot)).normalized();
+}
+
+PlotView::AnnoGrab PlotView::grabForRect(const QRect &r, QPoint p) const
+{
+    const int M = 6; // edge/handle grab margin in px
+    const bool inX = p.x() >= r.left() - M && p.x() <= r.right() + M;
+    const bool inY = p.y() >= r.top() - M && p.y() <= r.bottom() + M;
+    if (!inX || !inY) return AnnoGrab::None;
+    const bool nL = std::abs(p.x() - r.left())   <= M;
+    const bool nR = std::abs(p.x() - r.right())  <= M;
+    const bool nT = std::abs(p.y() - r.top())    <= M;
+    const bool nB = std::abs(p.y() - r.bottom()) <= M;
+    if (nT && nL) return AnnoGrab::TopLeft;
+    if (nT && nR) return AnnoGrab::TopRight;
+    if (nB && nL) return AnnoGrab::BottomLeft;
+    if (nB && nR) return AnnoGrab::BottomRight;
+    if (nL) return AnnoGrab::Left;
+    if (nR) return AnnoGrab::Right;
+    if (nT) return AnnoGrab::Top;
+    if (nB) return AnnoGrab::Bottom;
+    return AnnoGrab::Move; // inside the body
+}
+
+Qt::CursorShape PlotView::cursorForGrab(AnnoGrab g) const
+{
+    switch (g) {
+        case AnnoGrab::Left:
+        case AnnoGrab::Right:        return Qt::SizeHorCursor;
+        case AnnoGrab::Top:
+        case AnnoGrab::Bottom:       return Qt::SizeVerCursor;
+        case AnnoGrab::TopLeft:
+        case AnnoGrab::BottomRight:  return Qt::SizeFDiagCursor;
+        case AnnoGrab::TopRight:
+        case AnnoGrab::BottomLeft:   return Qt::SizeBDiagCursor;
+        case AnnoGrab::Move:         return Qt::SizeAllCursor;
+        default:                     return Qt::ArrowCursor;
+    }
+}
+
+int PlotView::annotationGrabAt(QPoint pos, AnnoGrab *grabOut)
+{
+    if (!spectrogramPlot || !isOverSpectrogram(pos.y())) {
+        if (grabOut) *grabOut = AnnoGrab::None;
+        return -1;
+    }
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    // Topmost (last drawn) wins, so iterate in reverse.
+    for (int i = (int)inputSrc->annotationList.size() - 1; i >= 0; --i) {
+        QRect r = annotationViewportRect(inputSrc->annotationList[i]);
+        AnnoGrab g = grabForRect(r, pos);
+        if (g != AnnoGrab::None) {
+            if (grabOut) *grabOut = g;
+            return i;
+        }
+    }
+    if (grabOut) *grabOut = AnnoGrab::None;
+    return -1;
+}
+
+long long PlotView::sampleAtViewportX(int vx)
+{
+    long long col = (long long)vx + horizontalScrollBar()->value();
+    if (col < 0) col = 0;
+    return col * (long long)samplesPerColumn();
+}
+
+double PlotView::freqAtViewportY(int vy) const
+{
+    if (!spectrogramPlot) return 0.0;
+    return spectrogramPlot->freqAtPlotY(vy + verticalScrollBar()->value());
+}
+
+void PlotView::updateAnnotationHover(QMouseEvent *event)
+{
+    AnnoGrab g = AnnoGrab::None;
+    int idx = annotationGrabAt(event->pos(), &g);
+    // Only claim the cursor while over an annotation; otherwise release it so
+    // the tuner / default cursor handling still works.
+    if (g != AnnoGrab::None)
+        viewport()->setCursor(cursorForGrab(g));
+    else
+        viewport()->unsetCursor();
+    if (idx != hoveredAnnotation) {
+        hoveredAnnotation = idx;
+        spectrogramPlot->setActiveAnnotation(idx);
+        viewport()->update();
+    }
+}
+
+bool PlotView::beginAnnotationEdit(QMouseEvent *event)
+{
+    AnnoGrab g = AnnoGrab::None;
+    int idx = annotationGrabAt(event->pos(), &g);
+    if (idx < 0 || g == AnnoGrab::None)
+        return false;
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    editingAnnotation = idx;
+    editGrab = g;
+    editPressPos = event->pos();
+    editOrig = inputSrc->annotationList[idx];
+    spectrogramPlot->setActiveAnnotation(idx);
+    viewport()->setCursor(cursorForGrab(g));
+    return true;
+}
+
+void PlotView::updateAnnotationEdit(QMouseEvent *event)
+{
+    if (editingAnnotation < 0) return;
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    if (editingAnnotation >= (int)inputSrc->annotationList.size()) {
+        editingAnnotation = -1;
+        return;
+    }
+
+    const long long count = (long long)inputSrc->count();
+    long long dS = sampleAtViewportX(event->pos().x()) - sampleAtViewportX(editPressPos.x());
+    double    dF = freqAtViewportY(event->pos().y()) - freqAtViewportY(editPressPos.y());
+
+    long long oMin = (long long)editOrig.sampleRange.minimum;
+    long long oMax = (long long)editOrig.sampleRange.maximum;
+    double    oLo  = editOrig.frequencyRange.minimum;
+    double    oHi  = editOrig.frequencyRange.maximum;
+    long long nMin = oMin, nMax = oMax;
+    double    nLo  = oLo,  nHi  = oHi;
+
+    switch (editGrab) {
+        case AnnoGrab::Move:
+            // Clamp the shift so the whole box stays within the file.
+            if (oMin + dS < 0) dS = -oMin;
+            if (count > 0 && oMax + dS > count - 1) dS = (count - 1) - oMax;
+            nMin = oMin + dS; nMax = oMax + dS;
+            nLo = oLo + dF;   nHi = oHi + dF;
+            break;
+        case AnnoGrab::Left:        nMin = oMin + dS; break;
+        case AnnoGrab::Right:       nMax = oMax + dS; break;
+        case AnnoGrab::Top:         nHi  = oHi + dF;  break; // top edge = higher freq
+        case AnnoGrab::Bottom:      nLo  = oLo + dF;  break;
+        case AnnoGrab::TopLeft:     nMin = oMin + dS; nHi = oHi + dF; break;
+        case AnnoGrab::TopRight:    nMax = oMax + dS; nHi = oHi + dF; break;
+        case AnnoGrab::BottomLeft:  nMin = oMin + dS; nLo = oLo + dF; break;
+        case AnnoGrab::BottomRight: nMax = oMax + dS; nLo = oLo + dF; break;
+        default: break;
+    }
+
+    if (nMin < 0) nMin = 0;
+    if (nMax < 0) nMax = 0;
+    if (count > 0) {
+        if (nMin > count - 1) nMin = count - 1;
+        if (nMax > count - 1) nMax = count - 1;
+    }
+    if (nMin > nMax) std::swap(nMin, nMax);
+    if (nLo > nHi)   std::swap(nLo, nHi);
+
+    Annotation &a = inputSrc->annotationList[editingAnnotation];
+    a.sampleRange = { (size_t)nMin, (size_t)nMax };
+    a.frequencyRange = { nLo, nHi };
+    viewport()->update();
+}
+
+void PlotView::finishAnnotationEdit(QMouseEvent *event)
+{
+    if (editingAnnotation < 0) return;
+    updateAnnotationEdit(event);
+    auto inputSrc = static_cast<InputSource*>(mainSampleSource);
+    const int idx = editingAnnotation;
+    editingAnnotation = -1;
+    editGrab = AnnoGrab::None;
+    if (idx >= 0 && idx < (int)inputSrc->annotationList.size()) {
+        // Commit through updateAnnotation so the dirty flag + change callbacks
+        // fire (enables Save, marks the title bar). The value is the one we
+        // edited live in place.
+        inputSrc->updateAnnotation(idx, inputSrc->annotationList[idx]);
+    }
+}
+
 bool PlotView::viewportEvent(QEvent *event) {
     if (event->type() == QEvent::MouseMove) {
         LatencyLog::mark("MouseMove ----------");
     } else if (event->type() == QEvent::Wheel) {
         LatencyLog::mark("Wheel ----------");
     }
-    // Shift+left-drag rectangle on the spectrogram → new annotation. Run
-    // before the per-plot dispatch so it doesn't accidentally drag the tuner.
+    // An in-progress annotation move/resize drag owns the mouse until release.
+    if (editingAnnotation >= 0) {
+        if (event->type() == QEvent::MouseMove) {
+            updateAnnotationEdit(static_cast<QMouseEvent*>(event));
+            return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease) {
+            finishAnnotationEdit(static_cast<QMouseEvent*>(event));
+            return true;
+        }
+    }
+
+    // Shift+left-drag on the spectrogram → new annotation; plain left-press on
+    // an existing annotation's box/handles → move/resize it. Both run before the
+    // per-plot dispatch so they don't drag the tuner. Hover (no button) shows
+    // the resize handles + cursor.
     if (event->type() == QEvent::MouseButtonPress) {
         auto *me = static_cast<QMouseEvent*>(event);
-        if (me->button() == Qt::LeftButton &&
-            (me->modifiers() & Qt::ShiftModifier) &&
-            spectrogramPlot &&
-            startAnnotationDrag(me)) {
-            return true;
+        if (me->button() == Qt::LeftButton && spectrogramPlot) {
+            if (me->modifiers() & Qt::ShiftModifier) {
+                if (startAnnotationDrag(me))
+                    return true;
+            } else if (beginAnnotationEdit(me)) {
+                return true;
+            }
         }
     } else if (event->type() == QEvent::MouseMove && annotDragging) {
         updateAnnotationDrag(static_cast<QMouseEvent*>(event));
@@ -957,6 +1463,10 @@ bool PlotView::viewportEvent(QEvent *event) {
     } else if (event->type() == QEvent::MouseButtonRelease && annotDragging) {
         finishAnnotationDrag(static_cast<QMouseEvent*>(event));
         return true;
+    } else if (event->type() == QEvent::MouseMove && spectrogramPlot) {
+        auto *me = static_cast<QMouseEvent*>(event);
+        if (me->buttons() == Qt::NoButton)
+            updateAnnotationHover(me);
     }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {

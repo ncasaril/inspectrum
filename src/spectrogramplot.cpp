@@ -81,8 +81,10 @@ void SpectrogramPlot::invalidateEvent()
 
 void SpectrogramPlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
-    if (tunerEnabled())
+    if (tunerEnabled()) {
         tuner.paintFront(painter, rect, sampleRange);
+        paintTunerReadout(painter, rect);
+    }
 
     if (frequencyScaleEnabled)
         paintFrequencyScale(painter, rect);
@@ -203,6 +205,79 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
     painter.restore();
 }
 
+void SpectrogramPlot::paintTunerReadout(QPainter &painter, QRect &rect)
+{
+    // Without a sample rate the pixel→Hz mapping is meaningless, so just leave
+    // the band un-annotated (the highlight itself still shows the width).
+    if (sampleRate <= 0.0)
+        return;
+
+    const double bw = tunerBandwidthHz();
+    const double offset = tunerOffsetHz();
+    const double centreFrequency = inputSource->getFrequency();
+    const bool haveAbsolute = centreFrequency != 0.0;
+
+    // Signed baseband-offset string, e.g. "+15 kHz" / "-3.2 kHz".
+    auto signedOffset = [](double hz) {
+        QString s = formatFrequencyLabel(fabs(hz), false);
+        s.prepend(hz < 0.0 ? QChar('-') : QChar('+'));
+        return s;
+    };
+
+    std::vector<QString> lines;
+    lines.push_back(QStringLiteral("BW ") + formatFrequencyLabel(bw, false));
+    if (haveAbsolute) {
+        // Absolute centre, with the tuning offset from capture DC in parens.
+        lines.push_back(formatFrequencyLabel(centreFrequency + offset, false)
+                        + QStringLiteral(" (") + signedOffset(offset)
+                        + QStringLiteral(")"));
+    } else {
+        // No absolute frequency known — the offset from capture DC is the only
+        // meaningful centre reference.
+        lines.push_back(signedOffset(offset));
+    }
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QFontMetrics fm(painter.font());
+
+    const int padX = 6;
+    const int padY = 4;
+    const int lineH = fm.height();
+    int textW = 0;
+    for (const auto &l : lines)
+        textW = std::max(textW, fm.boundingRect(l).width());
+    const int boxW = textW + 2 * padX;
+    const int boxH = lineH * static_cast<int>(lines.size()) + 2 * padY;
+
+    // Anchor to the centre (red) cursor line and right-align within the plot so
+    // the pill never collides with the left-edge frequency scale. Clamp
+    // vertically so it stays fully on-screen when the tuner is near an edge.
+    const int margin = 8;
+    int boxX = rect.right() - margin - boxW;
+    if (boxX < rect.left() + margin)
+        boxX = rect.left() + margin;
+    const int centreY = rect.top() + tuner.centre();
+    int boxY = centreY - boxH / 2;
+    if (boxY < rect.top() + 2)
+        boxY = rect.top() + 2;
+    if (boxY + boxH > rect.bottom() - 2)
+        boxY = rect.bottom() - 2 - boxH;
+
+    QRect box(boxX, boxY, boxW, boxH);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 160));
+    painter.drawRoundedRect(box, 4, 4);
+
+    painter.setPen(Qt::white);
+    int ty = boxY + padY + fm.ascent();
+    for (const auto &l : lines) {
+        painter.drawText(boxX + padX, ty, l);
+        ty += lineH;
+    }
+    painter.restore();
+}
+
 void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     // Pixel (from the top) at which 0 Hz sits
@@ -247,7 +322,31 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             }
             painter.drawRect(x, y, width, height);
 
-            visibleAnnotationLocations.emplace_back(a, x, y, width, height);
+            // Resize handles for the active (hovered / editing) annotation.
+            if (i == activeAnnotation_) {
+                const int hs = 3; // half handle size
+                const int xr = x + width, yb = y + height;
+                const int xm = x + width / 2, ym = y + height / 2;
+                painter.setPen(QPen(Qt::black, 1));
+                const int hx[] = { x, xm, xr, x, xr, x, xm, xr };
+                const int hy[] = { y, y,  y,  ym, ym, yb, yb, yb };
+                for (int k = 0; k < 8; ++k) {
+                    painter.fillRect(hx[k] - hs, hy[k] - hs, 2 * hs, 2 * hs, Qt::white);
+                    painter.drawRect(hx[k] - hs, hy[k] - hs, 2 * hs, 2 * hs);
+                }
+            }
+
+            // Hit rect for right-click / tooltip: pad by a few px and include
+            // the label drawn above the box so clicking the visible label (the
+            // natural target) still resolves to this annotation.
+            const int slop = 4;
+            int labelTop = sigmfAnnotationLabels ? (y - 2 - fm.ascent()) : y;
+            int labelW = sigmfAnnotationLabels ? fm.boundingRect(a.label).width() : 0;
+            int hitX = x - slop;
+            int hitY = std::min(y, labelTop) - slop;
+            int hitW = std::max(width, labelW) + 2 * slop;
+            int hitH = (y + height) - hitY + slop;
+            visibleAnnotationLocations.emplace_back(a, hitX, hitY, hitW, hitH);
         }
     }
 
@@ -299,6 +398,13 @@ double SpectrogramPlot::freqAtPlotY(int y) const
     if (height() <= 0 || sampleRate <= 0.0) return 0.0;
     const double offset = ((double)height() * 0.5 - (double)y) * sampleRate / (double)height();
     return inputSource->getFrequency() + offset;
+}
+
+int SpectrogramPlot::plotYAtFreq(double hz) const
+{
+    if (height() <= 0 || sampleRate <= 0.0) return 0;
+    const double offset = hz - inputSource->getFrequency();
+    return (int)std::lround((double)height() * 0.5 - offset * (double)height() / sampleRate);
 }
 
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)

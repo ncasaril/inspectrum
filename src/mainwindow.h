@@ -24,6 +24,8 @@
 #include "spectrogramcontrols.h"
 #include "plotview.h"
 
+class QMenu;
+
 class MainWindow : public QMainWindow, Subscriber
 {
     Q_OBJECT
@@ -48,10 +50,15 @@ protected:
 private:
     void onAnnotationsChanged();
     void refreshWindowTitle();
+    // (Re)populate the Tools -> Run plugin menu from the manifests in
+    // ~/.config/inspectrum/plugins. Called at startup and from "Reload plugins".
+    void rebuildPluginMenu();
 
     SpectrogramControls *dock;
     PlotView *plots;
     InputSource *input;
+    // The app's only menu — built lazily; "Run plugin" submenu lives under it.
+    QMenu *pluginMenu = nullptr;
     // Remembered base title (no dirty marker); refreshWindowTitle appends
     // "*" when annotations are unsaved.
     QString baseTitle;

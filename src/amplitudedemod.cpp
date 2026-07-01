@@ -18,6 +18,8 @@
  */
 
 #include "amplitudedemod.h"
+#include <algorithm>
+#include <cmath>
 
 AmplitudeDemod::AmplitudeDemod(std::shared_ptr<SampleSource<std::complex<float>>> src) : SampleBuffer(src)
 {
@@ -28,6 +30,40 @@ void AmplitudeDemod::work(void *input, void *output, int count, size_t sampleid)
 {
     auto in = static_cast<std::complex<float>*>(input);
     auto out = static_cast<float*>(output);
-    std::transform(in, in + count, out,
-                   [](std::complex<float> s) { return std::norm(s) * 2.0f - 1.0f; });
+
+    // Snapshot the display mode once per call so a mid-flight setter can't
+    // make the tile half-linear / half-dB.
+    const bool db = dbMode_.load(std::memory_order_relaxed);
+    if (!db) {
+        std::transform(in, in + count, out,
+                       [](std::complex<float> s) { return std::norm(s) * 2.0f - 1.0f; });
+        return;
+    }
+
+    // dB scale: 10·log10(|x|²) = 20·log10(|x|), plus the full-scale reference
+    // so the trace reads in dBFS (ref 0) or calibrated dBm (ref set). Silence
+    // (|x| = 0) is floored instead of producing -inf, which would poison the
+    // autoscale and leave a gap in the trace.
+    const float ref = static_cast<float>(refDbm_.load(std::memory_order_relaxed));
+    constexpr float kFloorDb = -120.0f;
+    for (int i = 0; i < count; i++) {
+        const float p = std::norm(in[i]);
+        float dbv = (p > 0.0f) ? 10.0f * std::log10(p) : kFloorDb;
+        if (dbv < kFloorDb) dbv = kFloorDb;
+        out[i] = dbv + ref;
+    }
+}
+
+void AmplitudeDemod::setDbMode(bool on)
+{
+    if (dbMode_.exchange(on, std::memory_order_relaxed) == on)
+        return;
+    invalidate();
+}
+
+void AmplitudeDemod::setReferenceLevelDbm(double dbm)
+{
+    if (refDbm_.exchange(dbm, std::memory_order_relaxed) == dbm)
+        return;
+    invalidate();
 }

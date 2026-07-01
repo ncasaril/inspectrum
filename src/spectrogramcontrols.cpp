@@ -20,6 +20,7 @@
 
 #include "spectrogramcontrols.h"
 #include <QIntValidator>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QSettings>
@@ -192,11 +193,34 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     annoColorCheckBox = new QCheckBox(widget);
     layout->addRow(new QLabel(tr("Annotation Colors:")), annoColorCheckBox);
 
+    // Editable global file metadata (SigMF global core:description + a
+    // non-standard inspectrum:title). Saved via the same Save annotations path.
+    fileTitleEdit = new QLineEdit(widget);
+    fileTitleEdit->setToolTip(tr(
+        "Short title for the whole capture. Stored as a non-standard "
+        "inspectrum:title in the SigMF global object (other tools ignore it)."));
+    layout->addRow(new QLabel(tr("File title:")), fileTitleEdit);
+    connect(fileTitleEdit, &QLineEdit::editingFinished, this, [this]() {
+        emit fileTitleChanged(fileTitleEdit->text());
+    });
+
+    fileDescriptionEdit = new QLineEdit(widget);
+    fileDescriptionEdit->setToolTip(tr(
+        "Free-text note for the whole capture. Stored as the standard SigMF "
+        "global core:description."));
+    layout->addRow(new QLabel(tr("File description:")), fileDescriptionEdit);
+    connect(fileDescriptionEdit, &QLineEdit::editingFinished, this, [this]() {
+        emit fileDescriptionChanged(fileDescriptionEdit->text());
+    });
+
     saveAnnotationsButton = new QPushButton(tr("Save annotations"), widget);
     saveAnnotationsButton->setEnabled(false);
     saveAnnotationsButton->setToolTip(tr(
-        "Write the current annotation list to a .sigmf-meta sidecar next to "
-        "the data file. Becomes enabled after add/edit/delete."));
+        "Persist the current annotation list. For a .sigmf-meta/.sigmf-data "
+        "pair this rewrites the .sigmf-meta; for a SigMF archive (.sigmf / "
+        ".sigmf.zst) it appends an updated meta member (the data is not "
+        "recompressed) so the newest notes win on the next open. Becomes "
+        "enabled after add/edit/delete."));
     layout->addRow(saveAnnotationsButton);
     connect(saveAnnotationsButton, &QPushButton::clicked,
             this, &SpectrogramControls::saveAnnotationsRequested);
@@ -308,6 +332,34 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("FM squelch:")), fmSquelchSpinBox);
     connect(fmSquelchSpinBox, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &SpectrogramControls::fmSquelchChanged);
+
+    // AM amplitude scale: linear power (default) vs a logarithmic dB scale.
+    // In dB the trace reads dBFS, or calibrated dBm once a full-scale
+    // reference is supplied below (the file carries no power calibration, so
+    // dBm needs the receiver's reference level entered by hand).
+    amDbCheckBox = new QCheckBox(widget);
+    amDbCheckBox->setChecked(false);
+    amDbCheckBox->setToolTip(tr(
+        "Show the AM (amplitude) plot on a dB scale instead of linear power. "
+        "Reads dBFS (dB below full scale); set a full-scale reference below to "
+        "read calibrated dBm."));
+    layout->addRow(new QLabel(tr("AM scale dB:")), amDbCheckBox);
+    connect(amDbCheckBox, &QCheckBox::toggled,
+            this, &SpectrogramControls::amDbModeChanged);
+
+    amRefLevelSpinBox = new QDoubleSpinBox(widget);
+    amRefLevelSpinBox->setRange(-200.0, 200.0);
+    amRefLevelSpinBox->setDecimals(1);
+    amRefLevelSpinBox->setSingleStep(1.0);
+    amRefLevelSpinBox->setValue(0.0);
+    amRefLevelSpinBox->setSuffix(" dBm");
+    amRefLevelSpinBox->setToolTip(tr(
+        "Power (dBm) corresponding to full scale (|IQ| = 1). Added to the AM "
+        "dB output so the plot reads true dBm — enter your receiver's "
+        "reference level. 0 leaves the scale as dBFS."));
+    layout->addRow(new QLabel(tr("AM full-scale ref:")), amRefLevelSpinBox);
+    connect(amRefLevelSpinBox, static_cast<void (QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            this, &SpectrogramControls::amRefLevelChanged);
 
     // Auto-tune button: ask PlotView to pick reasonable values for cutoff,
     // predemod M, and post N. PlotView computes from current Fs and tuner
@@ -547,6 +599,14 @@ void SpectrogramControls::setAnnotationsDirty(bool dirty)
 {
     saveAnnotationsButton->setEnabled(dirty);
     saveAnnotationsButton->setText(dirty ? tr("Save annotations *") : tr("Save annotations"));
+}
+
+void SpectrogramControls::setFileInfo(const QString &title, const QString &description)
+{
+    // setText doesn't emit editingFinished, so this won't loop back through
+    // fileTitleChanged / fileDescriptionChanged.
+    fileTitleEdit->setText(title);
+    fileDescriptionEdit->setText(description);
 }
 
 void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN)

@@ -47,8 +47,22 @@ MainWindow::MainWindow()
     plots = new PlotView(input);
     setCentralWidget(plots);
 
+    // The app ships no menu bar of its own; create one here to host external
+    // analysis plugins (Tools -> Run plugin -> <name>). Built at startup and
+    // refreshed via "Reload plugins" (the right-click submenu rediscovers on its own).
+    QMenu *toolsMenu = menuBar()->addMenu(tr("Tools"));
+    pluginMenu = toolsMenu->addMenu(tr("Run plugin"));
+    toolsMenu->addSeparator();
+    toolsMenu->addAction(tr("Reload plugins"), this, &MainWindow::rebuildPluginMenu);
+    rebuildPluginMenu();
+
     connect(dock, &SpectrogramControls::saveAnnotationsRequested,
             this, &MainWindow::saveAnnotations);
+    // Editable global file metadata → InputSource (persisted on save).
+    connect(dock, &SpectrogramControls::fileTitleChanged,
+            this, [this](QString t) { input->setGlobalTitle(t); });
+    connect(dock, &SpectrogramControls::fileDescriptionChanged,
+            this, [this](QString d) { input->setGlobalDescription(d); });
 
     // Connect dock inputs
     connect(dock, &SpectrogramControls::openFile, this, &MainWindow::openFile);
@@ -76,6 +90,9 @@ MainWindow::MainWindow()
     connect(dock, &SpectrogramControls::fmPredemodDecimChanged, plots, &PlotView::setFmPredemodDecimation);
     // FM amplitude squelch (% of window-peak |IQ|).
     connect(dock, &SpectrogramControls::fmSquelchChanged, plots, &PlotView::setFmSquelch);
+    // AM plot dB scale + full-scale reference (dBm; 0 = dBFS).
+    connect(dock, &SpectrogramControls::amDbModeChanged, plots, &PlotView::setAmDbMode);
+    connect(dock, &SpectrogramControls::amRefLevelChanged, plots, &PlotView::setAmReferenceLevel);
     // Symbol rate (Bd) for the FSK polar plot's differential delay.
     connect(dock, &SpectrogramControls::symbolRateChanged, plots, &PlotView::setSymbolRate);
     // Signal-strength gate (%) for the FSK polar constellation.
@@ -174,12 +191,24 @@ void MainWindow::openFile(QString fileName)
         if (pendingCenterHz > 0.0) {
             input->setCenterFrequency(pendingCenterHz);
         }
+        // Populate the dock's editable global metadata from the freshly-opened
+        // file (one-shot; setText doesn't re-emit the change signals).
+        dock->setFileInfo(input->globalTitle(), input->globalDescription());
     }
     catch (const std::exception &ex)
     {
         QMessageBox msgBox(QMessageBox::Critical, "Inspectrum openFile error", QString("%1: %2").arg(fileName).arg(ex.what()));
         msgBox.exec();
     }
+}
+
+void MainWindow::rebuildPluginMenu()
+{
+    if (pluginMenu == nullptr)
+        return;
+    pluginMenu->clear();
+    PlotView::buildPluginMenu(pluginMenu,
+                              [this](const PluginManifest &mf) { plots->runPlugin(mf); });
 }
 
 void MainWindow::invalidateEvent()

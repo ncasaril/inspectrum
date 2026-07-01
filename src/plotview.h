@@ -29,9 +29,15 @@
 #include "cursors.h"
 #include "inputsource.h"
 #include "plot.h"
+#include "plugin.h"
 #include "samplesource.h"
 #include "spectrogramplot.h"
 #include "traceplot.h"
+
+#include <functional>
+
+class QProgressDialog;
+class QMenu;
 
 class PlotView : public QGraphicsView, Subscriber
 {
@@ -40,6 +46,16 @@ class PlotView : public QGraphicsView, Subscriber
 public:
     PlotView(InputSource *input);
     void setSampleRate(double rate);
+    // Run an external analysis plugin over a chosen region of the tuned/filtered
+    // signal and turn its returned annotations into editable annotations. Prompts
+    // for scope (selection / view / whole) and any declared params. Called from the
+    // right-click "Run plugin" submenu and the MainWindow Tools menu.
+    void runPlugin(const PluginManifest &manifest);
+    // Populate `menu` with one action per discovered valid plugin (or a disabled
+    // "no plugins" entry), each wired to call onTrigger with its manifest. Shared by
+    // the right-click submenu and the Tools menu so the two stay in sync.
+    static void buildPluginMenu(QMenu *menu,
+                                const std::function<void(const PluginManifest &)> &onTrigger);
 
 signals:
     void timeSelectionChanged(float time);
@@ -95,6 +111,10 @@ public slots:
     void setFmPredemodDecimation(int m);
     // Amplitude squelch (% of window-peak |IQ|) for every FM plot. 0 = off.
     void setFmSquelch(int pct);
+    // Switch every AM plot between linear power and a dB scale.
+    void setAmDbMode(bool on);
+    // Full-scale reference (dBm) for AM plots in dB mode. 0 = dBFS.
+    void setAmReferenceLevel(double dbm);
     // Symbol rate (baud) for the FSK polar plot's differential delay. 0 = unset.
     void setSymbolRate(double baud);
     // Signal-strength gate (% of window peak) for the FSK polar constellation.
@@ -191,6 +211,10 @@ private:
     int    fmPredemodDecim = 1;
     bool   fmFastDemod = false;
     int    fmSquelchPct = 0; // amplitude squelch (% of window-peak |IQ|), 0 = off
+    // AM-plot display: dB scale toggle and full-scale reference (dBm; 0 = dBFS),
+    // re-applied to AM plots as they're added.
+    bool   amDbMode = false;
+    double amRefLevelDbm = 0.0;
     // Symbol rate (baud) re-applied to FSK polar plots as they're added. 0 = unset.
     double symbolRateHz = 0.0;
     // Constellation signal-strength gate (% of window peak), re-applied likewise.
@@ -207,6 +231,35 @@ private:
     bool startAnnotationDrag(QMouseEvent *event);
     void updateAnnotationDrag(QMouseEvent *event);
     void finishAnnotationDrag(QMouseEvent *event);
+
+    // --- Interactive bounds editing of an existing annotation ------------
+    // Which part of an annotation's box a point is grabbing: an edge/corner
+    // resizes that side, the body moves the whole box.
+    enum class AnnoGrab {
+        None, Move, Left, Right, Top, Bottom,
+        TopLeft, TopRight, BottomLeft, BottomRight
+    };
+    int      hoveredAnnotation = -1;   // drawn with handles; drives hover cursor
+    int      editingAnnotation = -1;   // currently being dragged (-1 = none)
+    AnnoGrab editGrab = AnnoGrab::None;
+    QPoint   editPressPos;             // viewport pos where the drag began
+    Annotation editOrig;               // annotation snapshot at drag start
+    // Viewport rectangle of an annotation's box at the current scroll/zoom.
+    QRect annotationViewportRect(const Annotation &a);
+    // Which grab region (if any) `pos` is over for box `r` (handle margin px).
+    AnnoGrab grabForRect(const QRect &r, QPoint pos) const;
+    Qt::CursorShape cursorForGrab(AnnoGrab g) const;
+    // Topmost annotation whose box/handles `pos` grabs; fills *grabOut. -1 none.
+    int annotationGrabAt(QPoint pos, AnnoGrab *grabOut);
+    // Map a viewport coordinate back to a sample index / absolute Hz.
+    long long sampleAtViewportX(int vx);
+    double freqAtViewportY(int vy) const;
+    // Hover (no button): set the active annotation + resize cursor.
+    void updateAnnotationHover(QMouseEvent *event);
+    // Press/drag/release on an annotation box to move or resize it.
+    bool beginAnnotationEdit(QMouseEvent *event);
+    void updateAnnotationEdit(QMouseEvent *event);
+    void finishAnnotationEdit(QMouseEvent *event);
     // Compose an annotation from a viewport rectangle and open the editor.
     // On accept, appends to the input source.
     void promptNewAnnotation(QRect viewportRect);
@@ -218,4 +271,17 @@ private:
     // Connected to InputSource::setAnnotationCallback in the constructor —
     // handles repaint, dirty title bar, dock save-button enable.
     void onAnnotationsChanged();
+
+    // --- External analysis plugins ---------------------------------------
+    // Ask the user which region to run a plugin over. Fills [start, count) in
+    // absolute samples and returns false if cancelled.
+    bool choosePluginScope(size_t &start, size_t &count);
+    // Build a param dialog from the manifest's declared params; fills `out` with
+    // the entered values (keyed by param key). Returns false if cancelled. With no
+    // declared params it returns true immediately with an empty object.
+    bool collectPluginParams(const PluginManifest &manifest, QJsonObject &out);
+    // One runner reused across runs (single-flight); progress dialog shown while
+    // a run is in flight.
+    PluginRunner *pluginRunner = nullptr;
+    QProgressDialog *pluginProgress = nullptr;
 };

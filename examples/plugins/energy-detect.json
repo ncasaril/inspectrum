@@ -1,0 +1,12 @@
+{
+  "name": "Energy burst detector",
+  "exec": "/REPLACE/WITH/ABSOLUTE/PATH/TO/inspectrum/examples/plugins/energy-detect.py",
+  "args": [],
+  "sample_type": "cf32",
+  "params": [
+    { "key": "threshold_db",    "type": "float",  "label": "Threshold (dB below peak)", "default": -10, "min": -120, "max": 0, "decimals": 1 },
+    { "key": "min_duration_ms", "type": "float",  "label": "Min duration (ms)",         "default": 1.0, "min": 0, "max": 100000, "decimals": 3 },
+    { "key": "merge_gap_ms",    "type": "float",  "label": "Merge gap (ms)",            "default": 0.5, "min": 0, "max": 100000, "decimals": 3 },
+    { "key": "label",           "type": "string", "label": "Annotation label",          "default": "burst" }
+  ]
+}

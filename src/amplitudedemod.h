@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "samplebuffer.h"
 
 class AmplitudeDemod : public SampleBuffer<std::complex<float>, float>
@@ -26,5 +27,24 @@ class AmplitudeDemod : public SampleBuffer<std::complex<float>, float>
 public:
     AmplitudeDemod(std::shared_ptr<SampleSource<std::complex<float>>> src);
     void work(void *input, void *output, int count, size_t sampleid) override;
-    bool workIsReentrant() override { return true; } // stateless |x|² map
+    // work() only reads dbMode_/refDbm_ (snapshotted per call via atomic
+    // loads) and never mutates instance state, so it stays lock-free for
+    // parallel tile workers.
+    bool workIsReentrant() override { return true; }
+
+    // Switch the output between the default linear power (2|x|²-1) and a
+    // logarithmic scale: 10·log10(|x|²) + reference. Invalidates so cached
+    // trace tiles recompute.
+    void setDbMode(bool on);
+    // Reference level (dBm) that maps to full scale (|x| = 1). Added to the
+    // dB output so the plot reads calibrated dBm; 0 leaves it as dBFS.
+    void setReferenceLevelDbm(double dbm);
+    bool dbMode() const { return dbMode_.load(std::memory_order_relaxed); }
+    double referenceLevelDbm() const { return refDbm_.load(std::memory_order_relaxed); }
+
+private:
+    // Lock-free so the reentrant work() can read them without serialising the
+    // tile workers; GUI-thread setters store + invalidate().
+    std::atomic<bool> dbMode_{false};
+    std::atomic<double> refDbm_{0.0};
 };
