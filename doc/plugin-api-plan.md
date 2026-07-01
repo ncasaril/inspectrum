@@ -1,6 +1,7 @@
 # Plugin API — implementation plan
 
-Status: **planning** (not yet implemented). Target branch: `main` (fork `ncasaril/inspectrum`).
+Status: **implemented** (branch `plugin-api`, fork `ncasaril/inspectrum`). This file is
+kept as the design record; the plugin author reference is `doc/plugins.md`.
 
 ## Goal
 
@@ -122,11 +123,12 @@ Resulting maps applied to each returned annotation:
   time-only detection), inspectrum fills them from the live **tuner pass-band**
   (`centre ± 0.5·tunerBandwidthHz()`).
 
-The parse+map is still factored into a free function `parsePluginAnnotations()` and
-**unit-tested by a standalone harness** (segStart offset, inclusive-max, freq
-passthrough, `#RRGGBBAA→#AARRGGBB` colour rotation, pass-band fallback), plus a
-segment round-trip test (`writeSegmentSigmf()` → reopen with `InputSource` → assert
-count/rate/centre).
+The parse+map is factored into a free function `parsePluginAnnotations()` and was
+validated during development with **standalone harnesses** (segStart offset,
+inclusive-max, freq passthrough, `#RRGGBBAA→#AARRGGBB` colour rotation, pass-band
+fallback, out-of-range clamp; plus a `writeSegmentSigmf()` round-trip and a full
+async run through the reference plugin). These are dev-time harnesses — the repo has
+no registered `ctest` tests yet, so they are not part of the tree.
 
 ## UI surface
 

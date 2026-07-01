@@ -113,8 +113,9 @@ std::vector<Annotation> parsePluginAnnotations(const QByteArray &json,
                                                QString *errorOut);
 
 // Runs a plugin over an extracted segment as an async child process. One run at a
-// time per instance (running() guards). Emits finished() with mapped annotations or
-// failed() with a human-readable error; exactly one is emitted per run().
+// time per instance (busy() guards — stays true across a cancelled extraction until
+// its worker is joined). Emits finished() with mapped annotations or failed() with a
+// human-readable error; exactly one is emitted per run(), and neither on cancel.
 class PluginRunner : public QObject
 {
     Q_OBJECT

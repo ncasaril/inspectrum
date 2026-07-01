@@ -505,7 +505,7 @@ void PluginRunner::onReadyStderr()
         return;
     errBuf_.append(proc_->readAllStandardError());
     if (errBuf_.size() > kMaxStderrBytes)
-        errBuf_.truncate(kMaxStderrBytes); // keep the head, stay bounded
+        errBuf_ = errBuf_.right(kMaxStderrBytes); // keep the tail — tracebacks come last
 }
 
 void PluginRunner::onProcFinished(int exitCode, int exitStatus)
@@ -516,6 +516,8 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
     if (proc_) {
         outBuf_.append(proc_->readAllStandardOutput());
         errBuf_.append(proc_->readAllStandardError());
+        if (errBuf_.size() > kMaxStderrBytes)
+            errBuf_ = errBuf_.right(kMaxStderrBytes);
     }
     const QString errStr = QString::fromUtf8(errBuf_);
 
