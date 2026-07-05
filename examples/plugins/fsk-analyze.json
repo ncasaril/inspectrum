@@ -1,0 +1,13 @@
+{
+  "name": "FSK/MSK analyser",
+  "exec": "/REPLACE/WITH/ABSOLUTE/PATH/TO/inspectrum/examples/plugins/fsk-analyze.py",
+  "args": [],
+  "sample_type": "cf32",
+  "params": [
+    { "key": "threshold_db",    "type": "float", "label": "Burst gate (dB below peak)", "default": -15, "min": -120, "max": 0, "decimals": 1 },
+    { "key": "min_duration_ms", "type": "float", "label": "Min burst duration (ms)",    "default": 0.5, "min": 0, "max": 100000, "decimals": 3 },
+    { "key": "merge_gap_ms",    "type": "float", "label": "Merge gap (ms)",             "default": 0.5, "min": 0, "max": 100000, "decimals": 3 },
+    { "key": "symbol_rate_hz",  "type": "float", "label": "Symbol rate (Hz, 0 = auto)", "default": 0, "min": 0, "max": 100000000, "decimals": 1 },
+    { "key": "max_bits",        "type": "int",   "label": "Max bits shown in comment",  "default": 96, "min": 0, "max": 65536 }
+  ]
+}

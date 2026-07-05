@@ -23,13 +23,13 @@ It then appears under **Tools → Run plugin ▸ <name>** and in the spectrogram
 right-click **Run plugin ▸** submenu. Use **Tools → Reload plugins** after adding or
 editing a manifest (the right-click menu rediscovers automatically).
 
-Try the bundled reference detector:
+Try the bundled reference plugins (python3 + numpy):
 
 ```sh
 mkdir -p ~/.config/inspectrum/plugins
-cp examples/plugins/energy-detect.json ~/.config/inspectrum/plugins/
-# edit "exec" in that copy to the absolute path of examples/plugins/energy-detect.py
-chmod +x examples/plugins/energy-detect.py    # needs python3 + numpy
+cp examples/plugins/energy-detect.json examples/plugins/fsk-analyze.json ~/.config/inspectrum/plugins/
+# edit "exec" in each copy to the absolute path of the matching .py under examples/plugins/
+chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
 ```
 
 ## Manifest format
@@ -130,3 +130,29 @@ the meta path from `argv[-1]` (the last argument, after any fixed `args`),
 numpy, energy-gates against the segment peak, and emits one annotation per detected
 burst (omitting freq edges so inspectrum uses the pass-band / full input band). Any language works — the
 contract is just argv + stdin + stdout JSON.
+
+### Bundled: FSK/MSK analyser
+
+`examples/plugins/fsk-analyze.py` is a fuller example: a 2FSK/MSK burst analyser.
+Each energy-gated burst is band-limited to its occupied spectrum (block-PSD
+estimate + brick-wall filter, so wideband noise can't swamp the discriminator),
+then analysed for the tone pair (shift and carrier offset), the symbol rate
+(from discriminator zero-crossing intervals), the modulation index (h ≈ 0.5 is
+labelled **MSK**, otherwise **2FSK**) and the data bits — decoded run-length
+between crossings, so timing can't drift over long bursts. Results land in the
+label (`MSK 4.8kBd`) and comment
+(`Rb=4800.6 Bd (h=0.50), shift ±1188 Hz, offset -2 Hz, bits[240]=1010…`,
+bits truncated to the `max_bits` param). It also demonstrates emitting absolute
+`core:freq_lower_edge`/`upper_edge` (a Carson-rule band around the tones) and
+`presentation:color`. Unmodulated bursts are labelled `carrier`; gated regions
+with no spectral peak 10 dB above the floor are treated as noise and skipped.
+
+`custom_params`:
+
+| key               | meaning |
+|-------------------|---------|
+| `threshold_db`    | burst gate relative to the segment peak (float, default -15) |
+| `min_duration_ms` | drop bursts shorter than this (float, default 0.5) |
+| `merge_gap_ms`    | merge bursts separated by less than this (float, default 0.5) |
+| `symbol_rate_hz`  | force the symbol rate; 0 = estimate per burst (float, default 0) |
+| `max_bits`        | bits of decoded data shown in the comment (int, default 96) |
