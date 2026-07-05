@@ -135,17 +135,26 @@ contract is just argv + stdin + stdout JSON.
 
 `examples/plugins/fsk-analyze.py` is a fuller example: a 2FSK/MSK burst analyser.
 Each energy-gated burst is band-limited to its occupied spectrum (block-PSD
-estimate + brick-wall filter, so wideband noise can't swamp the discriminator),
-then analysed for the tone pair (shift and carrier offset), the symbol rate
-(from discriminator zero-crossing intervals), the modulation index (h ≈ 0.5 is
-labelled **MSK**, otherwise **2FSK**) and the data bits — decoded run-length
-between crossings, so timing can't drift over long bursts. Results land in the
-label (`MSK 4.8kBd`) and comment
-(`Rb=4800.6 Bd (h=0.50), shift ±1188 Hz, offset -2 Hz, bits[240]=1010…`,
-bits truncated to the `max_bits` param). It also demonstrates emitting absolute
-`core:freq_lower_edge`/`upper_edge` (a Carson-rule band around the tones) and
-`presentation:color`. Unmodulated bursts are labelled `carrier`; gated regions
-with no spectral peak 10 dB above the floor are treated as noise and skipped.
+estimate + brick-wall filter, so wideband noise can't swamp the discriminator;
+signals occupying most of Nyquist are upsampled internally so ~2 samples/symbol
+captures still analyse), then analysed for the tone pair (shift and carrier
+offset), the symbol rate (from discriminator zero-crossing intervals), the
+modulation index (h = tone separation / Rb; h ≈ 0.5 is labelled **MSK**,
+otherwise **2FSK**) and the data bits — decoded run-length between crossings,
+so timing can't drift over long bursts. Results land in the label
+(`MSK 4.8kBd`) and comment
+(`fsk-analyze: Rb=4800.6 Bd (h=0.50), shift ±1188.2 Hz, offset -2 Hz, bits[240]=1010…`,
+bits truncated to the `max_bits` param and to a global ~2M-character budget
+across all annotations). Bursts with a recovered rate also demonstrate emitting
+absolute `core:freq_lower_edge`/`upper_edge` (a Carson-rule band around the
+tones) and `presentation:color`. Unmodulated bursts are labelled `carrier` and
+a tone pair with no transitions to derive a rate from is labelled `FSK`
+(`Rb n/a`) — both omit the freq edges so inspectrum fills the pass-band.
+Gated regions with no spectral peak 10 dB above the floor (or shorter than 32
+samples) are treated as noise and skipped. Gaussian pulse shaping (GFSK) reads
+slightly low on shift/h even after interior-based refinement — very soft
+shaping (BT ≤ 0.3) may be labelled 2FSK with h ≈ 0.4 — and strong in-band
+spurs corrupt the estimates, so tune onto the signal first in crowded spectrum.
 
 `custom_params`:
 
