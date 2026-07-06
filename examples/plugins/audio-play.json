@@ -1,0 +1,17 @@
+{
+  "name": "Audio playback (WFM/NFM/AM)",
+  "exec": "/usr/local/bin/inspectrum-audio-play",
+  "args": [],
+  "sample_type": "cf32",
+  "wants_band": true,
+  "long_running": true,
+  "params": [
+    { "key": "mode", "type": "enum", "label": "Demodulator", "default": "WFM", "choices": ["WFM", "NFM", "AM"] },
+    { "key": "loop", "type": "bool", "label": "Loop until cancelled", "default": true },
+    { "key": "deemphasis_us", "type": "enum", "label": "FM de-emphasis (us)", "default": "auto", "choices": ["auto", "75", "50", "0"] },
+    { "key": "audio_lpf_hz", "type": "float", "label": "Audio low-pass (Hz, 0 = mode default)", "default": 0, "min": 0, "max": 20000, "decimals": 0 },
+    { "key": "gain_db", "type": "float", "label": "Extra gain (dB)", "default": 0, "min": -40, "max": 40, "decimals": 1 },
+    { "key": "squelch_db", "type": "float", "label": "Squelch (dB below peak, 0 = off)", "default": 0, "min": -80, "max": 0, "decimals": 1 },
+    { "key": "max_seconds", "type": "float", "label": "Max seconds to play", "default": 30, "min": 0.1, "max": 300, "decimals": 1 }
+  ]
+}
