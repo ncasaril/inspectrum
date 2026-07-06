@@ -142,10 +142,19 @@ offset), the symbol rate (from discriminator zero-crossing intervals), the
 modulation index (h = tone separation / Rb; h ≈ 0.5 is labelled **MSK**,
 otherwise **2FSK**) and the data bits — decoded run-length between crossings,
 so timing can't drift over long bursts. Results land in the label
-(`MSK 4.8kBd`) and comment
-(`fsk-analyze: Rb=4800.6 Bd (h=0.50), shift ±1188.2 Hz, offset -2 Hz, bits[240]=1010…`,
-bits truncated to the `max_bits` param and to a global ~2M-character budget
-across all annotations). Bursts with a recovered rate also demonstrate emitting
+(`MSK 4.8kBd`) and a one-stat-per-line comment, e.g.
+
+```
+fsk-analyze:
+  Rb=4800.6 Bd (h=0.50)
+  shift ±1188.2 Hz
+  offset -2 Hz
+  bits[240]=0xA53C…
+```
+
+The decoded bits are shown as **MSB-first hex** (first decoded bit = top bit;
+a trailing partial nibble is right-padded), truncated to the `max_bits` param
+and to a global ~2M-character budget across all annotations. Bursts with a recovered rate also demonstrate emitting
 absolute `core:freq_lower_edge`/`upper_edge` (a Carson-rule band around the
 tones) and `presentation:color`. Unmodulated bursts are labelled `carrier` and
 a tone pair with no transitions to derive a rate from is labelled `FSK`
@@ -171,4 +180,4 @@ needs numpy).
 | `min_duration_ms` | drop bursts shorter than this (float, default 0.5) |
 | `merge_gap_ms`    | merge bursts separated by less than this (float, default 0.5) |
 | `symbol_rate_hz`  | force the symbol rate; 0 = estimate per burst (float, default 0) |
-| `max_bits`        | bits of decoded data shown in the comment (int, default 96) |
+| `max_bits`        | bits of decoded data shown as hex in the comment (int, default 96) |

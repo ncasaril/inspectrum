@@ -91,8 +91,14 @@ def get(comment, key):
 
 
 def get_bits(comment):
-    m = re.search(r"bits\[(\d+)\]=([01]+)", comment)
-    return (int(m.group(1)), m.group(2)) if m else (0, "")
+    # Comment carries MSB-first hex; decode back to the '0'/'1' run so the
+    # content checks below can substring-match against the TX bit pattern.
+    m = re.search(r"bits\[(\d+)\]=0x([0-9a-fA-F]+)", comment)
+    if not m:
+        return (0, "")
+    hexstr = m.group(2)
+    bits = bin(int(hexstr, 16))[2:].zfill(len(hexstr) * 4) if hexstr else ""
+    return (int(m.group(1)), bits)
 
 
 rng = np.random.default_rng(42)

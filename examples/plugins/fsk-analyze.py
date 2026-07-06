@@ -46,7 +46,8 @@ custom_params:
   min_duration_ms: drop bursts shorter than this (default 0.5 ms)
   merge_gap_ms   : merge bursts separated by less than this (default 0.5 ms)
   symbol_rate_hz : force the symbol rate; 0 = estimate per burst (default 0)
-  max_bits       : bits of decoded data shown in the comment (default 96)
+  max_bits       : bits of decoded data shown (as MSB-first hex) in the
+                   comment (default 96)
 
 Limitations: 2-level FSK only. A burst whose tone spread exceeds ~1/3 of the
 tone separation is flagged "multi-level?" in the comment. Gaussian pulse
@@ -373,6 +374,16 @@ def decode_bits(centered, cross, t):
     return "".join(out)
 
 
+def bits_to_hex(bits):
+    """MSB-first hex of a '0'/'1' run. First decoded bit is the top bit; a
+    trailing partial nibble is left-aligned (right-padded with zeros) so the
+    on-air bit order is preserved."""
+    if not bits:
+        return ""
+    pad = (-len(bits)) % 4
+    return "%0*X" % ((len(bits) + pad) // 4, int(bits + "0" * pad, 2))
+
+
 def refine_tones(centered, cross, t, c0, c1):
     """Re-estimate the tone pair from multi-symbol run interiors.
 
@@ -523,10 +534,11 @@ def burst_annotation(res, s, e, fs, center_freq):
     shown = res["bits"][:max(res["max_bits"], 0)] if res["bits"] else ""
     if shown:
         ell = "…" if len(res["bits"]) > len(shown) else ""
-        parts.append("bits[%d]=%s%s" % (len(res["bits"]), shown, ell))
+        parts.append("bits[%d]=0x%s%s" % (len(res["bits"]), bits_to_hex(shown), ell))
     parts.extend(res["notes"])
     ann["core:label"] = label
-    ann["core:comment"] = "fsk-analyze: " + ", ".join(parts)
+    # One stat per line so the annotation tooltip reads as a small card.
+    ann["core:comment"] = "fsk-analyze:\n  " + "\n  ".join(parts)
     return ann
 
 
