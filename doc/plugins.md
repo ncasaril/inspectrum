@@ -23,13 +23,13 @@ It then appears under **Tools → Run plugin ▸ <name>** and in the spectrogram
 right-click **Run plugin ▸** submenu. Use **Tools → Reload plugins** after adding or
 editing a manifest (the right-click menu rediscovers automatically).
 
-Try the bundled reference detector:
+Try the bundled reference plugins (python3 + numpy):
 
 ```sh
 mkdir -p ~/.config/inspectrum/plugins
-cp examples/plugins/energy-detect.json ~/.config/inspectrum/plugins/
-# edit "exec" in that copy to the absolute path of examples/plugins/energy-detect.py
-chmod +x examples/plugins/energy-detect.py    # needs python3 + numpy
+cp examples/plugins/energy-detect.json examples/plugins/fsk-analyze.json ~/.config/inspectrum/plugins/
+# edit "exec" in each copy to the absolute path of the matching .py under examples/plugins/
+chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
 ```
 
 ## Manifest format
@@ -130,3 +130,54 @@ the meta path from `argv[-1]` (the last argument, after any fixed `args`),
 numpy, energy-gates against the segment peak, and emits one annotation per detected
 burst (omitting freq edges so inspectrum uses the pass-band / full input band). Any language works — the
 contract is just argv + stdin + stdout JSON.
+
+### Bundled: FSK/MSK analyser
+
+`examples/plugins/fsk-analyze.py` is a fuller example: a 2FSK/MSK burst analyser.
+Each energy-gated burst is band-limited to its occupied spectrum (block-PSD
+estimate + brick-wall filter, so wideband noise can't swamp the discriminator;
+signals occupying most of Nyquist are upsampled internally so low-oversampling
+captures down to ~3 samples/symbol still analyse), then analysed for the tone pair (shift and carrier
+offset), the symbol rate (from discriminator zero-crossing intervals), the
+modulation index (h = tone separation / Rb; h ≈ 0.5 is labelled **MSK**,
+otherwise **2FSK**) and the data bits — decoded run-length between crossings,
+so timing can't drift over long bursts. Results land in the label
+(`MSK 4.8kBd`) and a one-stat-per-line comment, e.g.
+
+```
+fsk-analyze:
+  Rb=4800.6 Bd (h=0.50)
+  shift ±1188.2 Hz
+  offset -2 Hz
+  bits[240]=0xA53C…
+```
+
+The decoded bits are shown as **MSB-first hex** (first decoded bit = top bit;
+a trailing partial nibble is right-padded), truncated to the `max_bits` param
+and to a global ~2M-character budget across all annotations. Bursts with a recovered rate also demonstrate emitting
+absolute `core:freq_lower_edge`/`upper_edge` (a Carson-rule band around the
+tones) and `presentation:color`. Unmodulated bursts are labelled `carrier` and
+a tone pair with no transitions to derive a rate from is labelled `FSK`
+(`Rb n/a`) — both omit the freq edges so inspectrum fills the pass-band.
+Gated regions with no spectral peak 10 dB above the floor (or shorter than 32
+samples) are treated as noise and skipped. Gaussian pulse shaping (GFSK) reads
+slightly low on shift/h even after interior-based refinement — very soft
+shaping (BT ≤ 0.3) may be labelled 2FSK with h ≈ 0.4 — and strong in-band
+spurs corrupt the estimates, so tune onto the signal first in crowded spectrum.
+The symbol rate is accurate to a few percent on typical data but degrades on
+payloads dominated by long same-symbol runs (heavy bit imbalance, or
+repetitive framing with few single-symbol transitions); the tones, deviation,
+modulation type and bits stay usable there, so treat `Rb` as approximate. A
+synthetic regression suite covering these cases lives alongside the plugin in
+`examples/plugins/test_fsk_analyze.py` (`python3 examples/plugins/test_fsk_analyze.py`,
+needs numpy).
+
+`custom_params`:
+
+| key               | meaning |
+|-------------------|---------|
+| `threshold_db`    | burst gate relative to the segment peak (float, default -15) |
+| `min_duration_ms` | drop bursts shorter than this (float, default 0.5) |
+| `merge_gap_ms`    | merge bursts separated by less than this (float, default 0.5) |
+| `symbol_rate_hz`  | force the symbol rate; 0 = estimate per burst (float, default 0) |
+| `max_bits`        | bits of decoded data shown as hex in the comment (int, default 96) |
