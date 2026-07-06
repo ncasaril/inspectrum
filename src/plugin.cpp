@@ -86,6 +86,7 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path)
     m.name = root["name"].toString();
     m.exec = root["exec"].toString();
     m.sampleType = root["sample_type"].toString("cf32");
+    m.wantsBand = root["wants_band"].toBool(false);
 
     if (m.name.isEmpty()) {
         m.error = "manifest missing \"name\"";

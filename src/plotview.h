@@ -38,6 +38,7 @@
 
 class QProgressDialog;
 class QMenu;
+class QLabel;
 
 class PlotView : public QGraphicsView, Subscriber
 {
@@ -139,6 +140,7 @@ public slots:
 protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void contextMenuEvent(QContextMenuEvent * event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent * event) override;
@@ -280,6 +282,26 @@ private:
     // the entered values (keyed by param key). Returns false if cancelled. With no
     // declared params it returns true immediately with an empty object.
     bool collectPluginParams(const PluginManifest &manifest, QJsonObject &out);
+    // Extract [start,count) from src and run the plugin over it (size warning,
+    // param dialog, async runner). The tail shared by the tuner and band-select
+    // run paths. centerFreq/passLo/passHi are absolute Hz.
+    void executePluginRun(const PluginManifest &manifest,
+                          std::shared_ptr<SampleSource<std::complex<float>>> src,
+                          size_t start, size_t count,
+                          double centerFreq, double passLo, double passHi);
+    // "wants_band" flow: arm a spectrogram box-drag whose vertical extent is the
+    // centre + bandwidth and horizontal extent the time region. beginPluginBand-
+    // Select() enters the mode (hint + crosshair); a completed drag calls
+    // runPluginWithBand(); Esc / right-click / an empty file calls cancel.
+    void beginPluginBandSelect(const PluginManifest &manifest);
+    void cancelPluginBandSelect();
+    void runPluginWithBand(const QRect &viewportRect);
+    // Band-select state (see beginPluginBandSelect).
+    bool pluginBandSelect_ = false;
+    bool pluginBandDragging_ = false;
+    QPoint pluginBandOrigin_;
+    PluginManifest pluginBandManifest_;
+    QLabel *pluginBandHint_ = nullptr;
     // One runner reused across runs (single-flight); progress dialog shown while
     // a run is in flight.
     PluginRunner *pluginRunner = nullptr;

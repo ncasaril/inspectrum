@@ -69,6 +69,11 @@ struct PluginManifest {
     QStringList args;       // fixed args prepended before the meta-file path
     QString sampleType;     // accepted input sample type, e.g. "cf32"
     QVector<PluginParam> params;
+    // When true ("wants_band" in the manifest), the run flow prompts for a
+    // centre frequency + bandwidth (prefilled from the tuner) and hands the
+    // plugin exactly that filtered band. Plugins that don't care about the
+    // band leave this false and receive the tuner output / raw input as-is.
+    bool wantsBand = false;
     QString path;           // manifest file path (for diagnostics)
     bool valid = false;
     QString error;          // why it's invalid, if !valid

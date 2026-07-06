@@ -40,6 +40,7 @@ chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
   "exec": "/usr/local/bin/inspectrum-energy-detect",
   "args": ["--mode", "calls"],
   "sample_type": "cf32",
+  "wants_band": true,
   "params": [
     { "key": "threshold_db", "type": "float", "label": "Threshold (dB)", "default": -10 }
   ]
@@ -52,7 +53,18 @@ chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
 | `exec`        | executable: absolute path or PATH-resolvable (required) |
 | `args`        | fixed args prepended before the meta-file path (optional) |
 | `sample_type` | accepted input type; only `cf32` is offered today (default `cf32`) |
+| `wants_band`  | prompt for a centre frequency + bandwidth before running (default `false`) |
 | `params`      | parameters surfaced as a dialog before each run (optional) |
+
+Set `"wants_band": true` for a band-sensitive plugin. Running it then arms a
+**drag-a-box** mode on the spectrogram: the box you drag sets the band from its
+**vertical** extent (centre frequency + bandwidth) and the region from its **horizontal**
+extent (time), in one gesture — Esc or right-click cancels. inspectrum points the tuner at
+that band and hands the plugin exactly that slice, mixed to baseband and filtered to the
+box width, at the file's full sample rate. The box frequency edges also become the default
+`core:freq_lower_edge`/`upper_edge` for annotations that don't set their own. Plugins that
+don't care about the band omit the flag and receive the current tuner output (or the raw
+input when the tuner is off) over the region chosen in the usual dialog, as before.
 
 Each `params` entry: `key` (the JSON key passed to the plugin), `type` (`float` `int`
 `bool` `string` `enum`), `label` (dialog text, defaults to `key`), `default`, and

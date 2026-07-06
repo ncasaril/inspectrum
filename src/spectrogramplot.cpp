@@ -1064,6 +1064,30 @@ void SpectrogramPlot::setTunerCentreY(int y)
     tunerMoved();
 }
 
+void SpectrogramPlot::setTunerBandHz(double offsetHz, double bwHz)
+{
+    // Inverse of tunerOffsetHz()/tunerBandwidthHz(): place the tuner at a
+    // centre offset (Hz from the file centre) and pass-band width (Hz), then
+    // reconfigure the TunerTransform. Used by the plugin "wants_band" flow so
+    // a plugin receives exactly the band the user picked. The transform mixes
+    // + FIR-filters on getSamples() regardless of whether a plot is subscribed,
+    // so this works even with the tuner visually disabled.
+    const int h = height();
+    if (h <= 0 || sampleRate <= 0.0)
+        return;
+    int centre = (int)std::lround((0.5 - offsetHz / sampleRate) * h);
+    if (centre < 0) centre = 0;
+    if (centre > h) centre = h;
+    // deviation is a half-width in pixels; clamp to [1, h/2] so the FIR stays
+    // valid and the band cannot exceed Nyquist.
+    int dev = (int)std::lround(bwHz * h / (2.0 * sampleRate));
+    if (dev < 1) dev = 1;
+    if (dev > h / 2) dev = h / 2;
+    tuner.setCentre(centre);
+    tuner.setDeviation(dev);
+    tunerMoved();
+}
+
 void SpectrogramPlot::tunerMoved()
 {
     LatencyLog::mark("tunerMoved start");

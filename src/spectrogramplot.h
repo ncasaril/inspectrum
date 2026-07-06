@@ -103,6 +103,11 @@ public:
     // click "Add derived plot" menu so the new plot tunes to where the user
     // clicked instead of leaving the tuner at its previous position.
     void setTunerCentreY(int y);
+    // Place the tuner at a centre offset (Hz from file centre) and pass-band
+    // width (Hz) and reconfigure the TunerTransform. Inverse of the
+    // tunerOffsetHz()/tunerBandwidthHz() readouts; used by the plugin
+    // "wants_band" flow to hand a plugin a specific filtered band.
+    void setTunerBandHz(double offsetHz, double bwHz);
     void enableScales(bool enabled);
     void enableAnnotations(bool enabled);
     void enableAnnoLabels(bool enabled);

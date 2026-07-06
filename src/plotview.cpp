@@ -52,6 +52,7 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -627,6 +628,16 @@ void PlotView::mouseReleaseEvent(QMouseEvent *event)
     QGraphicsView::mouseReleaseEvent(event);
 }
 
+void PlotView::keyPressEvent(QKeyEvent *event)
+{
+    // Esc leaves an armed plugin band-select without running anything.
+    if (pluginBandSelect_ && event->key() == Qt::Key_Escape) {
+        cancelPluginBandSelect();
+        return;
+    }
+    QGraphicsView::keyPressEvent(event);
+}
+
 void PlotView::updateAnnotationTooltip(QMouseEvent *event)
 {
     // If there are any mouse buttons pressed, we assume
@@ -979,6 +990,74 @@ bool PlotView::collectPluginParams(const PluginManifest &manifest, QJsonObject &
     return true;
 }
 
+void PlotView::beginPluginBandSelect(const PluginManifest &manifest)
+{
+    // Mouse-driven band pick: the user drags a box on the spectrogram; its
+    // vertical extent becomes the centre + bandwidth and its horizontal extent
+    // the time region. The run fires when the drag completes (event filter).
+    pluginBandManifest_ = manifest;
+    pluginBandSelect_ = true;
+    if (!pluginBandHint_) {
+        pluginBandHint_ = new QLabel(viewport());
+        pluginBandHint_->setStyleSheet(
+            "background: rgba(0,0,0,190); color: #ffffff; padding: 6px 10px;"
+            "border: 1px solid #00c8ff; border-radius: 4px;");
+        pluginBandHint_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+    pluginBandHint_->setText(
+        tr("%1: drag a box over the signal to set band + time — Esc to cancel")
+            .arg(manifest.name));
+    pluginBandHint_->adjustSize();
+    pluginBandHint_->move(8, 8);
+    pluginBandHint_->show();
+    pluginBandHint_->raise();
+    viewport()->setCursor(Qt::CrossCursor);
+}
+
+void PlotView::cancelPluginBandSelect()
+{
+    pluginBandSelect_ = false;
+    pluginBandDragging_ = false;
+    if (pluginBandHint_)
+        pluginBandHint_->hide();
+    if (annotRubber)
+        annotRubber->hide();
+    viewport()->unsetCursor();
+}
+
+void PlotView::runPluginWithBand(const QRect &viewportRect)
+{
+    if (!spectrogramPlot) { cancelPluginBandSelect(); return; }
+    const PluginManifest manifest = pluginBandManifest_;
+    cancelPluginBandSelect();
+
+    // Vertical extent -> frequency band (smaller y = top of box = higher freq).
+    const int specTop = -verticalScrollBar()->value();
+    const double fTop = spectrogramPlot->freqAtPlotY(viewportRect.top() - specTop);
+    const double fBot = spectrogramPlot->freqAtPlotY(viewportRect.bottom() - specTop);
+    const double centreHz = 0.5 * (fTop + fBot);
+    const double bwHz = std::abs(fTop - fBot);
+
+    // Horizontal extent -> sample region.
+    const int hscroll = horizontalScrollBar()->value();
+    size_t s0 = columnToSample(viewportRect.left()  + hscroll);
+    size_t s1 = columnToSample(viewportRect.right() + hscroll);
+    if (s1 < s0) std::swap(s0, s1);
+
+    // Point the tuner at the chosen band so the plugin gets that mixed-to-
+    // baseband, filtered slice; the box's frequency edges also become the
+    // annotations' default freq bounds.
+    auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
+    spectrogramPlot->setTunerBandHz(centreHz - inputSrc->getFrequency(), bwHz);
+    auto src = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(spectrogramPlot->output());
+    if (!src) {
+        QMessageBox::warning(this, "Run plugin", "Could not access the sample source.");
+        return;
+    }
+    executePluginRun(manifest, src, s0, s1 - s0, centreHz,
+                     centreHz - 0.5 * bwHz, centreHz + 0.5 * bwHz);
+}
+
 void PlotView::buildPluginMenu(QMenu *menu,
                                const std::function<void(const PluginManifest &)> &onTrigger)
 {
@@ -1018,7 +1097,15 @@ void PlotView::runPlugin(const PluginManifest &manifest)
         return;
     }
 
-    // Source = the tuned/filtered IQ when the tuner is on, else the raw input
+    // Band-sensitive plugins pick their band by dragging a box on the
+    // spectrogram (mouse-selected centre + bandwidth + time); the run resumes
+    // in runPluginWithBand() when the drag completes.
+    if (manifest.wantsBand && spectrogramPlot) {
+        beginPluginBandSelect(manifest);
+        return;
+    }
+
+    // Otherwise: tuned/filtered IQ when the tuner is on, else the raw input
     // (mirrors the "Export samples" behaviour). The pass-band gives default
     // frequency bounds for annotations that don't specify their own.
     auto *inputSrc = static_cast<InputSource*>(mainSampleSource);
@@ -1045,6 +1132,14 @@ void PlotView::runPlugin(const PluginManifest &manifest)
     size_t start = 0, count = 0;
     if (!choosePluginScope(start, count))
         return;
+    executePluginRun(manifest, src, start, count, centerFreq, passLo, passHi);
+}
+
+void PlotView::executePluginRun(const PluginManifest &manifest,
+                                std::shared_ptr<SampleSource<std::complex<float>>> src,
+                                size_t start, size_t count,
+                                double centerFreq, double passLo, double passHi)
+{
     if (count == 0) {
         QMessageBox::information(this, "Run plugin", "The chosen region is empty.");
         return;
@@ -1439,6 +1534,42 @@ bool PlotView::viewportEvent(QEvent *event) {
         }
         if (event->type() == QEvent::MouseButtonRelease) {
             finishAnnotationEdit(static_cast<QMouseEvent*>(event));
+            return true;
+        }
+    }
+
+    // Plugin "wants_band" selection owns the mouse while armed: drag a box over
+    // the spectrogram to set the band (vertical) + time (horizontal). Right-
+    // click cancels (Esc is handled in keyPressEvent).
+    if (pluginBandSelect_) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::RightButton) {
+                cancelPluginBandSelect();
+                return true;
+            }
+            if (me->button() == Qt::LeftButton && isOverSpectrogram(me->pos().y())) {
+                pluginBandDragging_ = true;
+                pluginBandOrigin_ = me->pos();
+                if (!annotRubber)
+                    annotRubber = new QRubberBand(QRubberBand::Rectangle, viewport());
+                annotRubber->setGeometry(QRect(pluginBandOrigin_, QSize()));
+                annotRubber->show();
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove && pluginBandDragging_) {
+            annotRubber->setGeometry(
+                QRect(pluginBandOrigin_, static_cast<QMouseEvent*>(event)->pos()).normalized());
+            return true;
+        } else if (event->type() == QEvent::MouseButtonRelease && pluginBandDragging_) {
+            pluginBandDragging_ = false;
+            QRect r = QRect(pluginBandOrigin_,
+                            static_cast<QMouseEvent*>(event)->pos()).normalized();
+            if (annotRubber)
+                annotRubber->hide();
+            if (r.width() < 4 || r.height() < 4)
+                return true;  // too small to be intentional; stay armed
+            runPluginWithBand(r);
             return true;
         }
     }
