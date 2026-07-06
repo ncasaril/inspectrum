@@ -69,6 +69,17 @@ struct PluginManifest {
     QStringList args;       // fixed args prepended before the meta-file path
     QString sampleType;     // accepted input sample type, e.g. "cf32"
     QVector<PluginParam> params;
+    // When true ("wants_band" in the manifest), running the plugin arms a
+    // drag-a-box gesture on the spectrogram: the box's vertical extent sets the
+    // centre frequency + bandwidth and its horizontal extent the time region.
+    // inspectrum points the tuner at that band and hands the plugin exactly that
+    // filtered slice. Plugins that don't care about the band leave this false
+    // and receive the tuner output / raw input as-is.
+    bool wantsBand = false;
+    // When true ("long_running" in the manifest), the run timeout is disabled:
+    // the plugin runs until it exits or the user cancels. For interactive plugins
+    // (e.g. audio playback that loops until stopped). Still fully cancellable.
+    bool longRunning = false;
     QString path;           // manifest file path (for diagnostics)
     bool valid = false;
     QString error;          // why it's invalid, if !valid
@@ -84,14 +95,16 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path);
 QVector<PluginManifest> discoverPlugins();
 
 // Write a temporary SigMF segment (cf32_le .sigmf-data + .sigmf-meta) for samples
-// [start, start+count) pulled from `src`. The meta carries core:sample_rate and
-// captures[0].core:frequency = centerFreq (absolute Hz). Returns false + *errorOut
+// [start, start+count) pulled from `src`, keeping every `decim`-th sample (decim>=1;
+// the caller's tuner FIR must already band-limit the signal so striding is alias-
+// safe). The meta carries core:sample_rate = sampleRate (the ALREADY-decimated rate)
+// and captures[0].core:frequency = centerFreq (absolute Hz). Returns false + *errorOut
 // on failure. metaPathOut/dataPathOut may be null. Safe to call off the GUI thread.
 // If `cancel` is non-null and becomes true, the write aborts between chunks,
 // removes the partial data file, and returns false with *errorOut == "canceled".
 bool writeSegmentSigmf(const QString &dir,
                        SampleSource<std::complex<float>> *src,
-                       size_t start, size_t count,
+                       size_t start, size_t count, int decim,
                        double sampleRate, double centerFreq,
                        QString *metaPathOut, QString *dataPathOut,
                        QString *errorOut,
@@ -102,13 +115,15 @@ bool writeSegmentSigmf(const QString &dir,
 // local; inclusive max = abs + count - 1). Frequency edges are absolute Hz and pass
 // through; when omitted, [passLo, passHi] (the tuner pass-band) is substituted.
 //
-// segCount is the number of samples in the extracted segment: returned indices are
-// validated and clamped against it, so a buggy or hostile plugin cannot produce an
-// out-of-range / inverted range or trigger an out-of-range double->size_t cast.
-// Annotations whose start falls outside the segment, or with count < 1, are skipped.
-// Returns the parsed annotations; on malformed JSON returns empty and sets *errorOut.
+// segCount is the FULL-rate span of the extracted segment; decim is the extraction
+// decimation (>=1), so the plugin's indices run over segCount/decim samples and are
+// scaled back by decim to absolute file samples (abs = segStart + local*decim).
+// Returned indices are validated and clamped against the segment, so a buggy or
+// hostile plugin cannot produce an out-of-range / inverted range or trigger an
+// out-of-range double->size_t cast. Annotations whose start falls outside the
+// segment, or with count < 1, are skipped. On malformed JSON returns empty + *errorOut.
 std::vector<Annotation> parsePluginAnnotations(const QByteArray &json,
-                                               size_t segStart, size_t segCount,
+                                               size_t segStart, size_t segCount, int decim,
                                                double passLo, double passHi,
                                                QString *errorOut);
 
@@ -124,16 +139,18 @@ public:
     explicit PluginRunner(QObject *parent = nullptr);
     ~PluginRunner() override;
 
-    // Extract [start,count) from src, write the temp segment, and launch the plugin.
-    // centerFreq/passLo/passHi are absolute Hz. customParams is forwarded verbatim as
-    // the context.json "custom_params" object. Errors before launch are reported via
-    // failed(). timeoutMs <= 0 disables the timeout.
+    // Extract [start,count) from src, keeping every decim-th sample (decim>=1; the
+    // segment/context sample_rate becomes sampleRate/decim), write the temp segment,
+    // and launch the plugin. centerFreq/passLo/passHi are absolute Hz. customParams is
+    // forwarded verbatim as the context.json "custom_params" object. Errors before
+    // launch are reported via failed(). timeoutMs <= 0 disables the timeout.
     void run(const PluginManifest &manifest,
              std::shared_ptr<SampleSource<std::complex<float>>> src,
              size_t start, size_t count,
              double sampleRate, double centerFreq,
              double passLo, double passHi,
              const QJsonObject &customParams,
+             int decim = 1,
              int timeoutMs = 120000);
 
     // busy() (not running_) is the single-flight guard: running_ goes false the
@@ -149,6 +166,9 @@ public slots:
 signals:
     void finished(std::vector<Annotation> annotations);
     void failed(QString error);
+    // A progress line the plugin wrote to stderr (marked); host reflects it in the
+    // busy dialog. Emitted zero or more times between run() and finished/failed.
+    void progress(QString text);
 
 private slots:
     void onExtractFinished();
@@ -162,6 +182,7 @@ private:
     void cleanup();
     void fail(const QString &error);
     void launchProcess(const QString &metaPath);
+    void ingestStderr(const QByteArray &chunk);  // splits lines; routes progress vs error
 
     QProcess *proc_ = nullptr;
     QTimer *timeoutTimer_ = nullptr;
@@ -172,7 +193,8 @@ private:
     bool canceling_ = false;      // cancel requested while extraction is in flight
     int timeoutMs_ = 0;
     size_t segStart_ = 0;
-    size_t segCount_ = 0;
+    size_t segCount_ = 0;   // full-rate span
+    size_t segDecim_ = 1;   // extraction decimation (>=1)
     double passLo_ = 0.0;
     double passHi_ = 0.0;
     // Stashed at run() time; used to launch the process once extraction completes.
@@ -183,4 +205,5 @@ private:
     // exhaust the GUI process's memory.
     QByteArray outBuf_;
     QByteArray errBuf_;
+    QByteArray stderrLine_;   // partial-line buffer for the progress/error split
 };

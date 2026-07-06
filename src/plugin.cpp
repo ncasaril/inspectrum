@@ -40,6 +40,9 @@
 static const int kMaxStdoutBytes = 64 * 1024 * 1024;
 static const int kMaxStderrBytes = 1 * 1024 * 1024;
 static const size_t kMaxAnnotations = 100000;
+// A stderr line beginning with this byte (RS) is a progress update for the busy
+// dialog, not error output — its remainder becomes the dialog label.
+static const char kProgressMarker = 0x1E;
 
 namespace {
 
@@ -86,6 +89,8 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path)
     m.name = root["name"].toString();
     m.exec = root["exec"].toString();
     m.sampleType = root["sample_type"].toString("cf32");
+    m.wantsBand = root["wants_band"].toBool(false);
+    m.longRunning = root["long_running"].toBool(false);
 
     if (m.name.isEmpty()) {
         m.error = "manifest missing \"name\"";
@@ -161,12 +166,13 @@ QVector<PluginManifest> discoverPlugins()
 
 bool writeSegmentSigmf(const QString &dir,
                        SampleSource<std::complex<float>> *src,
-                       size_t start, size_t count,
+                       size_t start, size_t count, int decim,
                        double sampleRate, double centerFreq,
                        QString *metaPathOut, QString *dataPathOut,
                        QString *errorOut,
                        const std::atomic<bool> *cancel)
 {
+    if (decim < 1) decim = 1;
     auto setErr = [&](const QString &e) { if (errorOut) *errorOut = e; };
 
     if (src == nullptr) {
@@ -192,7 +198,8 @@ bool writeSegmentSigmf(const QString &dir,
             setErr(QString("cannot open %1 for writing").arg(dataPath));
             return false;
         }
-        const size_t chunk = 1u << 20; // 1 Msample = 8 MiB per pull
+        const size_t chunk = 1u << 20; // 1 Msample = 8 MiB per full-rate pull
+        std::vector<std::complex<float>> strided;   // reused decimation scratch
         for (size_t off = 0; off < count; off += chunk) {
             if (cancel && cancel->load()) {
                 setErr("canceled");
@@ -208,8 +215,26 @@ bool writeSegmentSigmf(const QString &dir,
                 data.remove();
                 return false;
             }
-            const char *bytes = reinterpret_cast<const char *>(buf.get());
-            qint64 want = (qint64)(n * sizeof(std::complex<float>));
+            const char *bytes;
+            qint64 want;
+            if (decim == 1) {
+                bytes = reinterpret_cast<const char *>(buf.get());
+                want = (qint64)(n * sizeof(std::complex<float>));
+            } else {
+                // Keep every decim-th sample. The tuner FIR already band-limited the
+                // signal to the selected band, so striding is alias-safe. chunkPhase
+                // keeps the every-Nth pattern aligned across chunk boundaries (off is
+                // the running full-rate offset from `start`, sample 0 = `start`).
+                const std::complex<float> *p = buf.get();
+                const size_t chunkPhase = ((size_t)decim - (off % (size_t)decim)) % (size_t)decim;
+                strided.clear();
+                for (size_t i = chunkPhase; i < n; i += (size_t)decim)
+                    strided.push_back(p[i]);
+                if (strided.empty())
+                    continue;
+                bytes = reinterpret_cast<const char *>(strided.data());
+                want = (qint64)(strided.size() * sizeof(std::complex<float>));
+            }
             if (data.write(bytes, want) != want) {
                 setErr(QString("short write to %1").arg(dataPath));
                 data.close();
@@ -262,12 +287,17 @@ bool writeSegmentSigmf(const QString &dir,
 }
 
 std::vector<Annotation> parsePluginAnnotations(const QByteArray &json,
-                                               size_t segStart, size_t segCount,
+                                               size_t segStart, size_t segCount, int decim,
                                                double passLo, double passHi,
                                                QString *errorOut)
 {
     std::vector<Annotation> out;
     if (errorOut) errorOut->clear();
+    if (decim < 1) decim = 1;
+    // The plugin worked on the decimated segment: its indices are in units of
+    // decim file samples. Validate against the decimated length, then scale back.
+    const size_t segCountDec = (segCount + (size_t)decim - 1) / (size_t)decim;
+    const size_t segLast = segStart + segCount - 1;
 
     QJsonParseError perr;
     QJsonDocument doc = QJsonDocument::fromJson(json, &perr);
@@ -295,19 +325,22 @@ std::vector<Annotation> parsePluginAnnotations(const QByteArray &json,
         // hostile/buggy plugin can emit huge or fractional values, and an
         // out-of-range double->size_t conversion is undefined behaviour. Bounds:
         // start must land inside the segment, count must be at least one sample.
-        if (!(dStart >= 0.0) || dStart >= (double)segCount)
+        if (!(dStart >= 0.0) || dStart >= (double)segCountDec)
             continue;
         if (!(dCount >= 1.0))
             continue;
 
-        const size_t localStart = (size_t)dStart;       // safe: 0 <= dStart < segCount
-        const size_t maxCnt = segCount - localStart;     // samples left in the segment
+        const size_t localStart = (size_t)dStart;        // 0 <= dStart < segCountDec
+        const size_t maxCnt = segCountDec - localStart;   // decimated samples left
         // Clamp the count so the inclusive max can neither wrap nor exceed the last
         // valid file sample (segStart + segCount - 1). Comparing the double avoids
         // casting an over-large value.
         const size_t cnt = (dCount >= (double)maxCnt) ? maxCnt : (size_t)dCount;
-        const size_t absStart = segStart + localStart;
-        const size_t absMax = absStart + cnt - 1; // inclusive, matches sampleRange
+        // Scale decimated indices back to absolute file samples; the last decimated
+        // sample stands for up to decim file samples, clamped to the segment end.
+        const size_t absStart = segStart + localStart * (size_t)decim;
+        size_t absMax = absStart + cnt * (size_t)decim - 1; // inclusive
+        if (absMax > segLast) absMax = segLast;
 
         // Frequency edges are absolute Hz. SigMF requires both-or-neither; fall back
         // to the tuner pass-band when either is absent.
@@ -351,8 +384,10 @@ void PluginRunner::run(const PluginManifest &manifest,
                        double sampleRate, double centerFreq,
                        double passLo, double passHi,
                        const QJsonObject &customParams,
+                       int decim,
                        int timeoutMs)
 {
+    if (decim < 1) decim = 1;
     if (running_ || canceling_) {
         // canceling_: a previous run was cancelled mid-extraction and its worker
         // hasn't been joined yet. Starting now would reset extractCancel_ and delete
@@ -382,17 +417,23 @@ void PluginRunner::run(const PluginManifest &manifest,
     extractCancel_ = false;
     outBuf_.clear();
     errBuf_.clear();
+    stderrLine_.clear();
     segStart_ = start;
     segCount_ = count;   // already clamped to [start, total) above
+    segDecim_ = decim;
     passLo_ = passLo;
     passHi_ = passHi;
     timeoutMs_ = timeoutMs;
+
+    // The plugin sees the decimated stream, so its sample_rate (context + meta) is
+    // the source rate divided by decim. Extraction still strides the full-rate src.
+    const double dataRate = (decim > 1) ? sampleRate / (double)decim : sampleRate;
 
     // Stash what launchProcess() needs once extraction completes.
     exec_ = manifest.exec;
     args_ = manifest.args;
     QJsonObject ctx;
-    ctx.insert("sample_rate", sampleRate);
+    ctx.insert("sample_rate", dataRate);
     ctx.insert("center_freq", centerFreq);
     ctx.insert("custom_params", customParams);
     contextJson_ = QJsonDocument(ctx).toJson(QJsonDocument::Compact);
@@ -411,11 +452,11 @@ void PluginRunner::run(const PluginManifest &manifest,
     connect(extractWatcher_, &QFutureWatcher<SegmentExtract>::finished,
             this, &PluginRunner::onExtractFinished);
     extractWatcher_->setFuture(QtConcurrent::run(
-        [src, start, count, sampleRate, centerFreq, dir, cancelPtr]() -> SegmentExtract {
+        [src, start, count, decim, dataRate, centerFreq, dir, cancelPtr]() -> SegmentExtract {
             SegmentExtract r;
             QString metaPath, err;
-            const bool ok = writeSegmentSigmf(dir, src.get(), start, count,
-                                              sampleRate, centerFreq,
+            const bool ok = writeSegmentSigmf(dir, src.get(), start, count, decim,
+                                              dataRate, centerFreq,
                                               &metaPath, nullptr, &err, cancelPtr);
             if (!ok && err == "canceled") {
                 r.canceled = true;
@@ -499,13 +540,32 @@ void PluginRunner::onReadyStdout()
     }
 }
 
+void PluginRunner::ingestStderr(const QByteArray &chunk)
+{
+    // Accumulate into a line buffer; a completed line starting with the progress
+    // marker becomes a dialog update (emitted, not stored), everything else is
+    // error output. The trailing partial line stays buffered for the next chunk.
+    stderrLine_.append(chunk);
+    int nl;
+    while ((nl = stderrLine_.indexOf('\n')) >= 0) {
+        const QByteArray line = stderrLine_.left(nl);
+        stderrLine_.remove(0, nl + 1);
+        if (!line.isEmpty() && line.at(0) == kProgressMarker)
+            emit progress(QString::fromUtf8(line.mid(1)).trimmed());
+        else
+            errBuf_.append(line).append('\n');
+    }
+    if (errBuf_.size() > kMaxStderrBytes)
+        errBuf_ = errBuf_.right(kMaxStderrBytes);   // keep the tail — tracebacks come last
+    if (stderrLine_.size() > kMaxStderrBytes)
+        stderrLine_ = stderrLine_.right(kMaxStderrBytes);
+}
+
 void PluginRunner::onReadyStderr()
 {
     if (!proc_)
         return;
-    errBuf_.append(proc_->readAllStandardError());
-    if (errBuf_.size() > kMaxStderrBytes)
-        errBuf_ = errBuf_.right(kMaxStderrBytes); // keep the tail — tracebacks come last
+    ingestStderr(proc_->readAllStandardError());
 }
 
 void PluginRunner::onProcFinished(int exitCode, int exitStatus)
@@ -515,7 +575,11 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
 
     if (proc_) {
         outBuf_.append(proc_->readAllStandardOutput());
-        errBuf_.append(proc_->readAllStandardError());
+        ingestStderr(proc_->readAllStandardError());
+        // Flush any trailing partial line (no final newline) that isn't progress.
+        if (!stderrLine_.isEmpty() && stderrLine_.at(0) != kProgressMarker)
+            errBuf_.append(stderrLine_);
+        stderrLine_.clear();
         if (errBuf_.size() > kMaxStderrBytes)
             errBuf_ = errBuf_.right(kMaxStderrBytes);
     }
@@ -548,7 +612,8 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
 
     QString perr;
     std::vector<Annotation> annos =
-        parsePluginAnnotations(outBuf_, segStart_, segCount_, passLo_, passHi_, &perr);
+        parsePluginAnnotations(outBuf_, segStart_, segCount_, (int)segDecim_,
+                               passLo_, passHi_, &perr);
     if (!perr.isEmpty()) {
         fail(QString("could not parse plugin output: %1%2")
                  .arg(perr).arg(errStr.isEmpty() ? QString() : "\n" + errStr));
