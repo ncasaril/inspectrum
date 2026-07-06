@@ -158,7 +158,10 @@ spurs corrupt the estimates, so tune onto the signal first in crowded spectrum.
 The symbol rate is accurate to a few percent on typical data but degrades on
 payloads dominated by long same-symbol runs (heavy bit imbalance, or
 repetitive framing with few single-symbol transitions); the tones, deviation,
-modulation type and bits stay usable there, so treat `Rb` as approximate.
+modulation type and bits stay usable there, so treat `Rb` as approximate. A
+synthetic regression suite covering these cases lives alongside the plugin in
+`examples/plugins/test_fsk_analyze.py` (`python3 examples/plugins/test_fsk_analyze.py`,
+needs numpy).
 
 `custom_params`:
 

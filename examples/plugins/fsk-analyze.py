@@ -195,7 +195,11 @@ def signal_band(x, fs):
     if win is None:
         return None
     lo, hi = float(freqs[win[0]]), float(freqs[win[1] - 1])
-    pad = 0.25 * (hi - lo) + 2.0 * fs / block
+    # Pad by ~0.6 of the window width: the 95%-power window brackets the FSK
+    # tone lines, but a line-spectrum burst (alternating 0101… preamble)
+    # carries its FM squarewave harmonics further out, and clipping them
+    # collapses the signal to a two-tone beat that misreads as a carrier.
+    pad = 0.6 * (hi - lo) + 2.0 * fs / block
     return (lo - pad, hi + pad)
 
 
@@ -448,6 +452,10 @@ def analyze_burst(x, fs, forced_rate, max_bits):
     min_d = max(3.0, 1.5 * up)
     t = fs / forced_rate if forced_rate > 0 else \
         estimate_period(zero_crossings(fa - 0.5 * (c0 + c1)), min_d)
+    if not np.isfinite(t) or t <= 0:
+        # No usable rate, or a forced rate so tiny that fs/rate overflowed
+        # once fs was scaled by the upsample factor. Treat as "no rate".
+        t = 0.0
 
     # Pass B: smooth to ~T/6, re-estimate tones, then final crossings/decode.
     bits = ""
