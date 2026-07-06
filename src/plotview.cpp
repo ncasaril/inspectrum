@@ -1221,6 +1221,11 @@ void PlotView::executePluginRun(const PluginManifest &manifest,
                           .arg(annos.size()).arg(annos.size() == 1 ? "" : "s");
                 QMessageBox::information(this, "Run plugin", msg);
             });
+        connect(pluginRunner, &PluginRunner::progress, this,
+            [this](QString text) {
+                if (pluginProgress && !text.isEmpty())
+                    pluginProgress->setLabelText(text);
+            });
         connect(pluginRunner, &PluginRunner::failed, this,
             [this](QString err) {
                 if (pluginProgress)
@@ -1243,8 +1248,11 @@ void PlotView::executePluginRun(const PluginManifest &manifest,
     pluginProgress->setLabelText(QString("Running %1...").arg(manifest.name));
     pluginProgress->show();
 
+    // Long-running (interactive) plugins run until they exit or the user cancels;
+    // others keep the default watchdog timeout.
+    const int timeoutMs = manifest.longRunning ? 0 : 120000;
     pluginRunner->run(manifest, src, start, count, sampleRate, centerFreq,
-                      passLo, passHi, params, decim);
+                      passLo, passHi, params, decim, timeoutMs);
 }
 
 void PlotView::updateSelectionPlots()

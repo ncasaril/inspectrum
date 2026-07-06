@@ -76,6 +76,10 @@ struct PluginManifest {
     // filtered slice. Plugins that don't care about the band leave this false
     // and receive the tuner output / raw input as-is.
     bool wantsBand = false;
+    // When true ("long_running" in the manifest), the run timeout is disabled:
+    // the plugin runs until it exits or the user cancels. For interactive plugins
+    // (e.g. audio playback that loops until stopped). Still fully cancellable.
+    bool longRunning = false;
     QString path;           // manifest file path (for diagnostics)
     bool valid = false;
     QString error;          // why it's invalid, if !valid
@@ -162,6 +166,9 @@ public slots:
 signals:
     void finished(std::vector<Annotation> annotations);
     void failed(QString error);
+    // A progress line the plugin wrote to stderr (marked); host reflects it in the
+    // busy dialog. Emitted zero or more times between run() and finished/failed.
+    void progress(QString text);
 
 private slots:
     void onExtractFinished();
@@ -175,6 +182,7 @@ private:
     void cleanup();
     void fail(const QString &error);
     void launchProcess(const QString &metaPath);
+    void ingestStderr(const QByteArray &chunk);  // splits lines; routes progress vs error
 
     QProcess *proc_ = nullptr;
     QTimer *timeoutTimer_ = nullptr;
@@ -197,4 +205,5 @@ private:
     // exhaust the GUI process's memory.
     QByteArray outBuf_;
     QByteArray errBuf_;
+    QByteArray stderrLine_;   // partial-line buffer for the progress/error split
 };

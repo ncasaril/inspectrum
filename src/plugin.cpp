@@ -40,6 +40,9 @@
 static const int kMaxStdoutBytes = 64 * 1024 * 1024;
 static const int kMaxStderrBytes = 1 * 1024 * 1024;
 static const size_t kMaxAnnotations = 100000;
+// A stderr line beginning with this byte (RS) is a progress update for the busy
+// dialog, not error output — its remainder becomes the dialog label.
+static const char kProgressMarker = 0x1E;
 
 namespace {
 
@@ -87,6 +90,7 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path)
     m.exec = root["exec"].toString();
     m.sampleType = root["sample_type"].toString("cf32");
     m.wantsBand = root["wants_band"].toBool(false);
+    m.longRunning = root["long_running"].toBool(false);
 
     if (m.name.isEmpty()) {
         m.error = "manifest missing \"name\"";
@@ -413,6 +417,7 @@ void PluginRunner::run(const PluginManifest &manifest,
     extractCancel_ = false;
     outBuf_.clear();
     errBuf_.clear();
+    stderrLine_.clear();
     segStart_ = start;
     segCount_ = count;   // already clamped to [start, total) above
     segDecim_ = decim;
@@ -535,13 +540,32 @@ void PluginRunner::onReadyStdout()
     }
 }
 
+void PluginRunner::ingestStderr(const QByteArray &chunk)
+{
+    // Accumulate into a line buffer; a completed line starting with the progress
+    // marker becomes a dialog update (emitted, not stored), everything else is
+    // error output. The trailing partial line stays buffered for the next chunk.
+    stderrLine_.append(chunk);
+    int nl;
+    while ((nl = stderrLine_.indexOf('\n')) >= 0) {
+        const QByteArray line = stderrLine_.left(nl);
+        stderrLine_.remove(0, nl + 1);
+        if (!line.isEmpty() && line.at(0) == kProgressMarker)
+            emit progress(QString::fromUtf8(line.mid(1)).trimmed());
+        else
+            errBuf_.append(line).append('\n');
+    }
+    if (errBuf_.size() > kMaxStderrBytes)
+        errBuf_ = errBuf_.right(kMaxStderrBytes);   // keep the tail — tracebacks come last
+    if (stderrLine_.size() > kMaxStderrBytes)
+        stderrLine_ = stderrLine_.right(kMaxStderrBytes);
+}
+
 void PluginRunner::onReadyStderr()
 {
     if (!proc_)
         return;
-    errBuf_.append(proc_->readAllStandardError());
-    if (errBuf_.size() > kMaxStderrBytes)
-        errBuf_ = errBuf_.right(kMaxStderrBytes); // keep the tail — tracebacks come last
+    ingestStderr(proc_->readAllStandardError());
 }
 
 void PluginRunner::onProcFinished(int exitCode, int exitStatus)
@@ -551,7 +575,11 @@ void PluginRunner::onProcFinished(int exitCode, int exitStatus)
 
     if (proc_) {
         outBuf_.append(proc_->readAllStandardOutput());
-        errBuf_.append(proc_->readAllStandardError());
+        ingestStderr(proc_->readAllStandardError());
+        // Flush any trailing partial line (no final newline) that isn't progress.
+        if (!stderrLine_.isEmpty() && stderrLine_.at(0) != kProgressMarker)
+            errBuf_.append(stderrLine_);
+        stderrLine_.clear();
         if (errBuf_.size() > kMaxStderrBytes)
             errBuf_ = errBuf_.right(kMaxStderrBytes);
     }
