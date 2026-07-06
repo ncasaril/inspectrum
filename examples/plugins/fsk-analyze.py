@@ -22,8 +22,8 @@
 Each energy-gated burst is band-limited to its occupied spectrum (block-PSD
 estimate + brick-wall filter, so wideband noise outside the signal cannot
 swamp the discriminator) and, when the signal occupies most of Nyquist,
-upsampled by FFT zero-padding so even ~2 samples/symbol captures (e.g. 1 MBd
-at 2 Msps) analyse cleanly. It then estimates:
+upsampled by FFT zero-padding so low-oversampling captures (down to ~3
+samples/symbol, e.g. 666 kBd at 2 Msps) still analyse. It then estimates:
   - the two tone frequencies -> shift (deviation) and carrier offset,
   - the symbol rate (from zero-crossing intervals of the discriminator),
   - the modulation index h = tone separation / symbol rate = 2*shift/Rb
@@ -54,7 +54,17 @@ shaping (GFSK) biases the measured shift low — tones are re-estimated from
 multi-symbol run interiors to compensate, but very soft shaping (BT <= 0.3)
 can still read h ~= 0.4 and be labelled 2FSK. Strong in-band spurs sharing
 the burst's spectrum corrupt the estimates: tune the spectrogram onto the
-signal first in crowded captures. Analysis is capped at 4 Msamples per burst.
+signal first in crowded captures.
+
+The symbol rate is recovered from discriminator zero-crossing intervals,
+which is accurate (within a few %) on typical random-ish data down to ~3
+samples/symbol, but DEGRADES on payloads dominated by long same-symbol runs:
+heavy bit imbalance (e.g. idle-high framing, ~10-20% low) and repetitive
+framing with few single-symbol runs (can lock onto a small multiple of the
+true rate). The tone frequencies, deviation, modulation type and decoded
+bits remain usable in those cases; treat Rb as approximate. Analysis is
+capped at 4 Msamples and 65536 decoded bits per burst (a note is appended to
+the comment when either cap is hit).
 """
 
 import json
@@ -114,16 +124,41 @@ def movavg(v, w):
     return np.concatenate([np.full(lpad, out[0]), out, np.full(rpad, out[-1])])
 
 
+def min_power_window(excess, frac):
+    """Narrowest contiguous bin range [a, b) holding `frac` of total power.
+
+    Two-pointer sweep over the non-negative per-bin excess. Because the two
+    humps of a symmetric wide-shift FSK pair — or a strong tone and its weak
+    partner in heavily unbalanced data — split the power, a high fraction is
+    forced to span both; a genuinely broadband signal yields nearly the whole
+    band; a narrowband signal stays tight.
+    """
+    total = float(excess.sum())
+    if total <= 0:
+        return None
+    target = frac * total
+    cum = np.concatenate([[0.0], np.cumsum(excess)])
+    best = (0, excess.size)
+    i = 0
+    for j in range(1, excess.size + 1):
+        while cum[j] - cum[i] >= target and i < j:
+            if (j - i) < (best[1] - best[0]):
+                best = (i, j)
+            i += 1
+    return best
+
+
 def signal_band(x, fs):
     """Occupied band (lo, hi) Hz from a block-averaged PSD.
 
-    Returns None when nothing rises 10 dB above the median floor or the
-    burst is too short (< 32 samples) to tell signal from noise. The band is
-    the contiguous hot region holding the most excess power, widened by hot
-    regions of comparable width nearby — so both humps of a wide-shift FSK
-    pair join, while a narrow spur (e.g. an SDR DC spike) stays excluded.
-    A signal spread across most of Nyquist (many hot bins, none dominant —
-    the median "floor" then includes the signal itself) gets the full band.
+    Returns None when nothing rises 10 dB above the median floor (noise) or
+    the burst is too short (< 32 samples) to tell signal from noise. When a
+    signal is present the band is the narrowest window holding 95% of the
+    HOT-bin power (measuring hot power only decouples the width from
+    broadband noise); isolated narrow spurs well below the main signal (an
+    SDR DC spike) are dropped first. A constant-envelope signal so wide it
+    becomes its own noise floor (e.g. MSK near Rb = fs/2, no hot bin) gets
+    the full band.
     """
     block = 1024
     while block > x.size // 2:
@@ -139,20 +174,27 @@ def signal_band(x, fs):
     floor = float(np.median(psd))
     hot = psd > 10.0 * floor
     if not hot.any():
+        # Flat spectrum: either noise, or a signal filling most of Nyquist.
+        # Constant envelope tells them apart: FSK has |x| ~= const (CV ~ 0),
+        # noise is Rayleigh (CV ~ 0.52).
+        env = np.abs(x[:nb * block])
+        mean_env = float(env.mean())
+        if nb >= 16 and mean_env > 0 and float(env.std()) / mean_env < 0.3:
+            return (-0.5 * fs, 0.5 * fs)
         return None
-    excess = np.clip(psd - floor, 0.0, None)
+    excess = np.clip(psd - floor, 0.0, None) * hot
     regions = list(find_runs(hot))
     powers = [float(excess[s:e].sum()) for s, e in regions]
-    di = int(np.argmax(powers))
-    if int(np.count_nonzero(hot)) >= 16 and powers[di] < 0.5 * float(excess.sum()):
-        return (-0.5 * fs, 0.5 * fs)
-    dom = list(regions[di])
-    dw = dom[1] - dom[0]
-    for s, e in regions:
-        gap = (s - dom[1]) if s >= dom[1] else (dom[0] - e)
-        if (e - s) >= max(2, dw // 8) and gap <= 2 * dw:
-            dom[0], dom[1] = min(dom[0], s), max(dom[1], e)
-    lo, hi = float(freqs[dom[0]]), float(freqs[dom[1] - 1])
+    peak = max(powers)
+    for (s, e), pw in zip(regions, powers):
+        # A narrow region holding little power next to a much stronger signal
+        # is a spur (e.g. a 1-bin DC spike), not an FSK tone — drop it.
+        if (e - s) <= 2 and pw < 0.5 * peak:
+            excess[s:e] = 0.0
+    win = min_power_window(excess, 0.95)
+    if win is None:
+        return None
+    lo, hi = float(freqs[win[0]]), float(freqs[win[1] - 1])
     pad = 0.25 * (hi - lo) + 2.0 * fs / block
     return (lo - pad, hi + pad)
 
@@ -166,7 +208,7 @@ def filter_upsample(x, fs, lo, hi, up):
     if up <= 1:
         return np.fft.ifft(X)
     Xu = np.zeros(n * up, dtype=complex)
-    h = n // 2
+    h = (n + 1) // 2  # DC + positive bins (n//2 would misplace one for odd n)
     Xu[:h] = X[:h]
     Xu[-(n - h):] = X[h:]
     return np.fft.ifft(Xu) * up
@@ -229,30 +271,23 @@ def drop_close_pairs(cross, min_gap):
     return np.array(out)
 
 
-def estimate_period(cross):
-    """Symbol period (samples) from crossing intervals, or 0 on failure.
+def _period_candidates(d):
+    """Fit a symbol period from each of several seeds over intervals d.
 
-    Intervals between crossings of NRZ data are integer multiples of the
-    symbol period. Each percentile candidate seeds T and is re-fit as
-    T = sum(d)/sum(round(d/T)). Seeding at several percentiles matters
-    because repetitive payloads can have almost no single-symbol intervals,
-    which strands a single mid-percentile seed on a multiple of the true
-    period. Among candidates whose fit explains (nearly) the most intervals
-    the LARGEST T wins: a too-small T also fits everything, because
-    round(d/T) can absorb any interval.
+    Returns [(T, inlier_fraction, mean_abs_residual), ...]. Seeds span low
+    percentiles (rare single-symbol runs in repetitive payloads) up to the
+    median; each is re-fit as T = sum(d)/sum(round(d/T)) since crossing
+    intervals of NRZ data are integer multiples of the symbol period.
     """
-    d = np.diff(cross)
-    d = d[d >= 3.0]  # sub-3-sample intervals are noise double-crossings
-    if d.size < 2:
-        return 0.0
+    seeds = [float(np.percentile(d, q)) for q in (2.0, 5.0, 20.0, 50.0)]
+    seeds.append(float(np.min(d)))
     cands = []
-    for q in (5.0, 20.0, 50.0):
-        t = float(np.percentile(d, q))
+    for t in seeds:
         if t <= 0:
             continue
-        for _ in range(4):
+        for _ in range(5):
             k = np.maximum(1.0, np.round(d / t))
-            good = np.abs(d / k - t) < 0.35 * t
+            good = np.abs(d / k - t) < 0.3 * t
             if np.count_nonzero(good) >= 2:
                 t = float(np.sum(d[good]) / np.sum(k[good]))
             else:
@@ -262,11 +297,47 @@ def estimate_period(cross):
         if t <= 0:
             continue
         k = np.maximum(1.0, np.round(d / t))
-        cands.append((t, float(np.mean(np.abs(d / k - t) < 0.35 * t))))
+        inl = np.abs(d / k - t) < 0.3 * t
+        frac = float(np.mean(inl))
+        resid = float(np.mean(np.abs(d[inl] / k[inl] - t) / t)) if inl.any() else 1.0
+        cands.append((t, frac, resid))
+    return cands
+
+
+def _pick_period(cands):
+    """Largest T that fits nearly all intervals with a low residual.
+
+    A too-small T (T/2, T/3) fits everything too, because round(d/T) absorbs
+    any interval — hence "largest". The residual gate rejects a 1.5T grid
+    (systematic 0.5T residual on a {1T, 2T} mix scores near zero at 0.3T but
+    would otherwise sneak through on frac alone). Falls back to the
+    best-fitting candidate when none clear the absolute gate.
+    """
     if not cands:
         return 0.0
-    best = max(score for _, score in cands)
-    return max(t for t, score in cands if score >= max(0.8, best - 0.05))
+    good = [t for t, frac, resid in cands if frac >= 0.85 and resid < 0.1]
+    if good:
+        return max(good)
+    best = max(frac for _, frac, _ in cands)
+    if best < 0.5:
+        return 0.0  # nothing fits even half the intervals: no usable rate
+    return max(t for t, frac, _ in cands if frac >= best - 0.02)
+
+
+def estimate_period(cross, min_d=3.0):
+    """Symbol period (samples) from crossing intervals, or 0 on failure.
+
+    min_d filters noise double-crossings and must scale with any upsampling
+    (the caller passes ~1.5 * the upsample factor). Accurate for random data
+    down to ~3 samples/symbol; heavily unbalanced (>>50% one symbol) or
+    repetitive payloads with few single-symbol runs bias the estimate (see
+    the module docstring) but keep the correct order of magnitude.
+    """
+    d = np.diff(cross)
+    d = d[d >= min_d]
+    if d.size < 2:
+        return 0.0
+    return _pick_period(_period_candidates(d))
 
 
 def runs_between(centered, cross):
@@ -372,8 +443,11 @@ def analyze_burst(x, fs, forced_rate, max_bits):
         # No resolvable tone pair (a 2-means split of a single noisy tone
         # yields separation ~= 1.4 sigma against spread ~= 0.4 sigma).
         return {"kind": "carrier", "offset": float(np.median(f))}
+    # 1.5*up (not 3*up): at ~2 samples/symbol the single-symbol crossing
+    # intervals are only 2*up long and must survive the noise filter.
+    min_d = max(3.0, 1.5 * up)
     t = fs / forced_rate if forced_rate > 0 else \
-        estimate_period(zero_crossings(fa - 0.5 * (c0 + c1)))
+        estimate_period(zero_crossings(fa - 0.5 * (c0 + c1)), min_d)
 
     # Pass B: smooth to ~T/6, re-estimate tones, then final crossings/decode.
     bits = ""
@@ -384,7 +458,7 @@ def analyze_burst(x, fs, forced_rate, max_bits):
         centered = fb - 0.5 * (c0 + c1)
         cross = drop_close_pairs(zero_crossings(centered), 0.4 * t)
         if forced_rate <= 0 and cross.size >= 3:
-            t = estimate_period(cross) or t
+            t = estimate_period(cross, min_d) or t
         if cross.size >= 1:
             bits = decode_bits(centered, cross, t)
             c0, c1 = refine_tones(centered, cross, t, c0, c1)
@@ -406,6 +480,8 @@ def analyze_burst(x, fs, forced_rate, max_bits):
         notes.append("multi-level?")
     if truncated:
         notes.append("analysed first %.0f ms" % (x.size / fs * 1e3))
+    if len(bits) >= MAX_DECODE_BITS:
+        notes.append("bit decode capped at %d" % MAX_DECODE_BITS)
     return {
         "kind": kind, "rb": rb, "dev": dev, "offset": offset, "h": h,
         "bits": bits, "notes": notes, "max_bits": max_bits,
@@ -436,8 +512,8 @@ def burst_annotation(res, s, e, fs, center_freq):
     else:
         parts.insert(0, "Rb n/a (no transitions)")
         label = res["kind"]
-    if res["bits"]:
-        shown = res["bits"][:max(res["max_bits"], 0)]
+    shown = res["bits"][:max(res["max_bits"], 0)] if res["bits"] else ""
+    if shown:
         ell = "…" if len(res["bits"]) > len(shown) else ""
         parts.append("bits[%d]=%s%s" % (len(res["bits"]), shown, ell))
     parts.extend(res["notes"])
@@ -475,9 +551,13 @@ def main():
         center_freq = float(ctx.get("center_freq", 0.0))
     if not np.isfinite(center_freq):
         center_freq = 0.0
-    if forced_rate > 0 and not np.isfinite(sample_rate / forced_rate):
-        sys.stderr.write("fsk-analyze: symbol_rate_hz out of range\n")
-        return 1
+    if forced_rate > 0:
+        # numpy division: a denormal rate yields inf here instead of raising
+        # OverflowError the way plain float division would.
+        ratio = float(np.float64(sample_rate) / np.float64(forced_rate))
+        if not (np.isfinite(forced_rate) and np.isfinite(ratio) and ratio >= 1.0):
+            sys.stderr.write("fsk-analyze: symbol_rate_hz out of range\n")
+            return 1
 
     nbytes = os.path.getsize(data_path)
     n_samples = nbytes // 8  # complex64

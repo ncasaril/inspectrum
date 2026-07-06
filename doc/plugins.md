@@ -136,8 +136,8 @@ contract is just argv + stdin + stdout JSON.
 `examples/plugins/fsk-analyze.py` is a fuller example: a 2FSK/MSK burst analyser.
 Each energy-gated burst is band-limited to its occupied spectrum (block-PSD
 estimate + brick-wall filter, so wideband noise can't swamp the discriminator;
-signals occupying most of Nyquist are upsampled internally so ~2 samples/symbol
-captures still analyse), then analysed for the tone pair (shift and carrier
+signals occupying most of Nyquist are upsampled internally so low-oversampling
+captures down to ~3 samples/symbol still analyse), then analysed for the tone pair (shift and carrier
 offset), the symbol rate (from discriminator zero-crossing intervals), the
 modulation index (h = tone separation / Rb; h ≈ 0.5 is labelled **MSK**,
 otherwise **2FSK**) and the data bits — decoded run-length between crossings,
@@ -155,6 +155,10 @@ samples) are treated as noise and skipped. Gaussian pulse shaping (GFSK) reads
 slightly low on shift/h even after interior-based refinement — very soft
 shaping (BT ≤ 0.3) may be labelled 2FSK with h ≈ 0.4 — and strong in-band
 spurs corrupt the estimates, so tune onto the signal first in crowded spectrum.
+The symbol rate is accurate to a few percent on typical data but degrades on
+payloads dominated by long same-symbol runs (heavy bit imbalance, or
+repetitive framing with few single-symbol transitions); the tones, deviation,
+modulation type and bits stay usable there, so treat `Rb` as approximate.
 
 `custom_params`:
 
