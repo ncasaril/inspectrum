@@ -650,7 +650,12 @@ void PlotView::updateAnnotationTooltip(QMouseEvent *event)
     } else {
         QString* comment = spectrogramPlot->mouseAnnotationComment(event);
         if (comment != nullptr) {
-            QToolTip::showText(event->globalPos(), *comment);
+            // Render embedded newlines as real line breaks so multi-line
+            // comments (e.g. the fsk-analyze plugin's one-stat-per-line
+            // readout) show as multiple lines instead of one long run.
+            QString html = comment->toHtmlEscaped();
+            html.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+            QToolTip::showText(event->globalPos(), html);
         } else {
             QToolTip::hideText();
         }
