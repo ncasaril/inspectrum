@@ -1081,8 +1081,18 @@ void PlotView::runPluginWithBand(const QRect &viewportRect)
         QMessageBox::warning(this, "Run plugin", "Could not access the sample source.");
         return;
     }
+    // Decimate the extraction to match the selected band: the tuner FIR already
+    // limited the signal to ~bwHz, so keeping the full source rate would hand the
+    // plugin (and a temp file) hundreds of times more samples than the band needs.
+    // Largest power-of-2 decim keeping the decimated rate >= 2*bwHz (Nyquist above
+    // the band, with margin for the FIR skirt); 1 if the box spans most of the span.
+    int decim = 1;
+    if (bwHz > 0.0 && sampleRate > 0.0) {
+        while ((double)(decim * 2) <= sampleRate / (2.0 * bwHz) && decim < (1 << 20))
+            decim *= 2;
+    }
     executePluginRun(manifest, src, s0, s1 - s0, centreHz,
-                     centreHz - 0.5 * bwHz, centreHz + 0.5 * bwHz);
+                     centreHz - 0.5 * bwHz, centreHz + 0.5 * bwHz, decim);
 }
 
 void PlotView::buildPluginMenu(QMenu *menu,
@@ -1171,16 +1181,19 @@ void PlotView::runPlugin(const PluginManifest &manifest)
 void PlotView::executePluginRun(const PluginManifest &manifest,
                                 std::shared_ptr<SampleSource<std::complex<float>>> src,
                                 size_t start, size_t count,
-                                double centerFreq, double passLo, double passHi)
+                                double centerFreq, double passLo, double passHi,
+                                int decim)
 {
     if (count == 0) {
         QMessageBox::information(this, "Run plugin", "The chosen region is empty.");
         return;
     }
+    if (decim < 1) decim = 1;
 
     // Warn before extracting a very large segment (written to a temp file on a
     // worker thread before the plugin runs; cancellable from the busy dialog).
-    const double bytes = (double)count * sizeof(std::complex<float>);
+    // Size is measured AFTER decimation — that's what actually lands on disk.
+    const double bytes = (double)(count / (size_t)decim) * sizeof(std::complex<float>);
     if (bytes > 512.0 * 1024 * 1024) {
         auto r = QMessageBox::question(this, "Run plugin",
             QString("This extracts %1 MiB of IQ to a temporary file. Continue?")
@@ -1231,7 +1244,7 @@ void PlotView::executePluginRun(const PluginManifest &manifest,
     pluginProgress->show();
 
     pluginRunner->run(manifest, src, start, count, sampleRate, centerFreq,
-                      passLo, passHi, params);
+                      passLo, passHi, params, decim);
 }
 
 void PlotView::updateSelectionPlots()

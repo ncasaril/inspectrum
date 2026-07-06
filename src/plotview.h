@@ -288,7 +288,8 @@ private:
     void executePluginRun(const PluginManifest &manifest,
                           std::shared_ptr<SampleSource<std::complex<float>>> src,
                           size_t start, size_t count,
-                          double centerFreq, double passLo, double passHi);
+                          double centerFreq, double passLo, double passHi,
+                          int decim = 1);
     // "wants_band" flow: arm a spectrogram box-drag whose vertical extent is the
     // centre + bandwidth and horizontal extent the time region. beginPluginBand-
     // Select() enters the mode (hint + crosshair); a completed drag calls
