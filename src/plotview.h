@@ -299,6 +299,7 @@ private:
     // Band-select state (see beginPluginBandSelect).
     bool pluginBandSelect_ = false;
     bool pluginBandDragging_ = false;
+    bool pluginBandSwallowContextMenu_ = false;  // eat the menu a cancel right-click delivers
     QPoint pluginBandOrigin_;
     PluginManifest pluginBandManifest_;
     QLabel *pluginBandHint_ = nullptr;

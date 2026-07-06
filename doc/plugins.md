@@ -53,7 +53,7 @@ chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
 | `exec`        | executable: absolute path or PATH-resolvable (required) |
 | `args`        | fixed args prepended before the meta-file path (optional) |
 | `sample_type` | accepted input type; only `cf32` is offered today (default `cf32`) |
-| `wants_band`  | prompt for a centre frequency + bandwidth before running (default `false`) |
+| `wants_band`  | drag a box on the spectrogram to pick the band + time before running (default `false`) |
 | `params`      | parameters surfaced as a dialog before each run (optional) |
 
 Set `"wants_band": true` for a band-sensitive plugin. Running it then arms a

@@ -650,12 +650,17 @@ void PlotView::updateAnnotationTooltip(QMouseEvent *event)
     } else {
         QString* comment = spectrogramPlot->mouseAnnotationComment(event);
         if (comment != nullptr) {
-            // Render embedded newlines as real line breaks so multi-line
-            // comments (e.g. the fsk-analyze plugin's one-stat-per-line
-            // readout) show as multiple lines instead of one long run.
+            // Render as rich text so embedded newlines become real line breaks
+            // (multi-line plugin comments, e.g. fsk-analyze's one-stat-per-line
+            // readout). Escape first, convert '\n' → <br/>, then wrap in <html>
+            // so Qt always classifies it as rich text: otherwise Qt5's
+            // mightBeRichText() only fires on a literal "&lt;", so a single-line
+            // comment with escaped '&', '>', or '"' (but no '<') would be shown
+            // as plain text with its entities rendered literally.
             QString html = comment->toHtmlEscaped();
             html.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
-            QToolTip::showText(event->globalPos(), html);
+            QToolTip::showText(event->globalPos(),
+                               QStringLiteral("<html>") + html + QStringLiteral("</html>"));
         } else {
             QToolTip::hideText();
         }
@@ -664,6 +669,13 @@ void PlotView::updateAnnotationTooltip(QMouseEvent *event)
 
 void PlotView::contextMenuEvent(QContextMenuEvent * event)
 {
+    // A right-click that just cancelled an armed band-select must not also open
+    // the normal context menu (the right-press handler sets this one-shot flag).
+    if (pluginBandSwallowContextMenu_) {
+        pluginBandSwallowContextMenu_ = false;
+        return;
+    }
+
     QMenu menu;
 
     // Determine which plot was clicked: spectrogram (index 0) or a derived plot (index >=1)
@@ -1033,20 +1045,30 @@ void PlotView::cancelPluginBandSelect()
 void PlotView::runPluginWithBand(const QRect &viewportRect)
 {
     if (!spectrogramPlot) { cancelPluginBandSelect(); return; }
+    // Belt-and-braces single-flight guard: arming only happens when not busy and
+    // the progress dialog is modal, but don't retune/extract if a run slipped in.
+    if (pluginRunner && pluginRunner->busy()) { cancelPluginBandSelect(); return; }
     const PluginManifest manifest = pluginBandManifest_;
     cancelPluginBandSelect();
 
     // Vertical extent -> frequency band (smaller y = top of box = higher freq).
+    // Clamp to the spectrogram's pixel span so a box dragged down into the
+    // derived plots (or above the top) reports the band actually delivered
+    // rather than a frequency extrapolated past Nyquist.
     const int specTop = -verticalScrollBar()->value();
-    const double fTop = spectrogramPlot->freqAtPlotY(viewportRect.top() - specTop);
-    const double fBot = spectrogramPlot->freqAtPlotY(viewportRect.bottom() - specTop);
+    const int specH = spectrogramPlot->height();
+    const int yTop = qBound(0, viewportRect.top()    - specTop, specH);
+    const int yBot = qBound(0, viewportRect.bottom() - specTop, specH);
+    const double fTop = spectrogramPlot->freqAtPlotY(yTop);
+    const double fBot = spectrogramPlot->freqAtPlotY(yBot);
     const double centreHz = 0.5 * (fTop + fBot);
     const double bwHz = std::abs(fTop - fBot);
 
-    // Horizontal extent -> sample region.
+    // Horizontal extent -> sample region. Clamp columns to >= 0 so a drag
+    // released left of the file start doesn't wrap columnToSample (size_t).
     const int hscroll = horizontalScrollBar()->value();
-    size_t s0 = columnToSample(viewportRect.left()  + hscroll);
-    size_t s1 = columnToSample(viewportRect.right() + hscroll);
+    size_t s0 = columnToSample(qMax(0, viewportRect.left()  + hscroll));
+    size_t s1 = columnToSample(qMax(0, viewportRect.right() + hscroll));
     if (s1 < s0) std::swap(s0, s1);
 
     // Point the tuner at the chosen band so the plugin gets that mixed-to-
@@ -1096,6 +1118,12 @@ void PlotView::runPlugin(const PluginManifest &manifest)
         QMessageBox::information(this, "Run plugin", "No file is open.");
         return;
     }
+    // Disarm any band-select left armed by a previous run request. runPlugin is
+    // reachable from the always-live Tools menu, so picking a second plugin
+    // before dragging the first's box must not leave the first armed — else a
+    // later spectrogram drag would silently run the abandoned plugin.
+    if (pluginBandSelect_)
+        cancelPluginBandSelect();
     if (pluginRunner && pluginRunner->busy()) {
         QMessageBox::information(this, "Run plugin",
             "A plugin is already running. Wait for it to finish or cancel it.");
@@ -1551,6 +1579,8 @@ bool PlotView::viewportEvent(QEvent *event) {
             auto *me = static_cast<QMouseEvent*>(event);
             if (me->button() == Qt::RightButton) {
                 cancelPluginBandSelect();
+                // Swallow the context menu that this same right-click delivers.
+                pluginBandSwallowContextMenu_ = true;
                 return true;
             }
             if (me->button() == Qt::LeftButton && isOverSpectrogram(me->pos().y())) {
@@ -1565,6 +1595,11 @@ bool PlotView::viewportEvent(QEvent *event) {
         } else if (event->type() == QEvent::MouseMove && pluginBandDragging_) {
             annotRubber->setGeometry(
                 QRect(pluginBandOrigin_, static_cast<QMouseEvent*>(event)->pos()).normalized());
+            return true;
+        } else if (event->type() == QEvent::MouseMove) {
+            // Armed but not yet dragging: keep the crosshair and consume the
+            // move so the hover handler below doesn't reset the cursor.
+            viewport()->setCursor(Qt::CrossCursor);
             return true;
         } else if (event->type() == QEvent::MouseButtonRelease && pluginBandDragging_) {
             pluginBandDragging_ = false;
