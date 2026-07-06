@@ -193,3 +193,34 @@ needs numpy).
 | `merge_gap_ms`    | merge bursts separated by less than this (float, default 0.5) |
 | `symbol_rate_hz`  | force the symbol rate; 0 = estimate per burst (float, default 0) |
 | `max_bits`        | bits of decoded data shown as hex in the comment (int, default 96) |
+
+### Bundled: audio playback (WFM/NFM/AM)
+
+`examples/plugins/audio-play.py` demonstrates a plugin whose output is *sound*,
+not just annotations. It sets `"wants_band": true`, so you **drag a box over a
+station** on the spectrogram; inspectrum tunes to that band, mixes it to
+baseband and hands the plugin the filtered IQ, which it demodulates and plays
+through the system's audio device (`aplay` / `pw-play` / `paplay`, whichever
+works first). The box's horizontal extent is how much you hear — drag a short
+span for a quick listen.
+
+Modes (the `mode` param): **WFM** (broadcast FM, 15 kHz audio, 75 µs
+de-emphasis), **NFM** (narrowband voice, 4 kHz audio, 50 µs, optional squelch),
+**AM** (envelope detector). It resamples the demodulated audio to 48 kHz,
+DC-blocks the carrier offset, peak-normalises, and returns one annotation
+covering the played region with a one-stat-per-line comment (mode, duration,
+measured peak deviation).
+
+Playback blocks until the audio finishes or you hit **Cancel** in the busy
+dialog (which kills the player child too); `max_seconds` (default 30) caps the
+span so a long box can't hit the run timeout. Needs `python3` + `numpy` +
+`scipy` and any of the players above.
+
+| key             | meaning |
+|-----------------|---------|
+| `mode`          | `WFM` \| `NFM` \| `AM` (default `WFM`) |
+| `deemphasis_us` | FM de-emphasis time constant; `auto` picks 75/50 by mode, `0` disables |
+| `audio_lpf_hz`  | audio low-pass cutoff (float, 0 = mode default) |
+| `gain_db`       | extra gain after peak-normalisation (float, default 0) |
+| `squelch_db`    | mute audio below this many dB under the segment peak (float, 0 = off) |
+| `max_seconds`   | cap the played duration (float, default 30) |
