@@ -761,6 +761,31 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         plotsMenu->addAction(action);
     }
 
+    // Plots derived from the raw (pre-tuner) input. The normal derived plots
+    // all sit behind the TunerTransform, so low-level detail like PA ramp-up
+    // is shaped by the tuner's FIR and its placement; these bypass that and
+    // show the untouched capture. Deliberately does not touch the tuner.
+    {
+        QMenu *rawMenu = menu.addMenu("Add raw plot (pre-filter)");
+        auto rawSrc = std::static_pointer_cast<AbstractSampleSource>(spectrogramPlot->input());
+        auto rawCompatible = as_range(Plots::plots.equal_range(rawSrc->sampleType()));
+        for (auto p : rawCompatible) {
+            auto plotInfo = p.second;
+            auto action = new QAction(QString("Add raw %1").arg(plotInfo.name), rawMenu);
+            auto plotCreator = plotInfo.creator;
+            connect(
+                action, &QAction::triggered,
+                this, [=]() {
+                    addPlot(plotCreator(rawSrc));
+                    this->zoomSample = clickSample;
+                    this->zoomPos = centerX;
+                    this->updateView(true);
+                }
+            );
+            rawMenu->addAction(action);
+        }
+    }
+
     // Add submenu for extracting symbols
     QMenu *extractMenu = menu.addMenu("Extract symbols");
     // Add action to extract symbols from selected plot to stdout

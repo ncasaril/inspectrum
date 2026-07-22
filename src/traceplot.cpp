@@ -544,49 +544,57 @@ void TracePlot::handleImage(QString key, QImage image)
 void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
                           size_t count, int step, double mid, double invRange)
 {
-    // Build a path by down-sampling to at most one point per pixel column.
     // Scaling (mid, invRange) is supplied by the caller so all tiles share one range.
     QPainterPath path;
     const int w = rect.width();
     const int h = rect.height();
+    if (w < 1 || h < 1 || count == 0) return;
     range_t<float> xRange{0.f, float(w - 2)};
     range_t<float> yRange{0.f, float(h - 2)};
 
-    // Compute x-step per sample
-    const double xStep = double(w) / double(count);
-    // Down-sample: at most one point per pixel
-    size_t decim = 1;
-    if (size_t(w) < count)
-        decim = (count + w - 1) / w;  // ceil(count/w)
-
-    bool first = true;
-    // Plot samples at intervals of decim
-    for (size_t i = 0; i < count; i += decim) {
-        float s = samples[i * step];
+    auto toY = [&](float s) {
         double norm = (s - mid) * invRange;
-        double x = i * xStep;
-        double y = (1.0 - norm) * (h * 0.5);
+        return (1.0 - norm) * (h * 0.5);
+    };
 
-        x = xRange.clip(x) + rect.x();
-        y = yRange.clip(y) + rect.y();
+    // Picking one sample per pixel column aliases: any component faster than
+    // the pixel rate (an IQ carrier at a few px/cycle) folds down and renders
+    // as a slow, clean-looking waveform. Up to a few samples per pixel we can
+    // afford to draw every sample; denser than that no line plot can show the
+    // waveform anyway, so draw an honest per-column min/max envelope instead.
+    static const size_t maxPointsPerPixel = 16;
+    const size_t samplesPerPx = (count + w - 1) / w;
 
-        if (first) {
-            path.moveTo(x, y);
-            first = false;
-        } else {
-            path.lineTo(x, y);
+    if (samplesPerPx <= maxPointsPerPixel) {
+        const double xStep = double(w) / double(count);
+        bool first = true;
+        for (size_t i = 0; i < count; i++) {
+            double x = xRange.clip(i * xStep) + rect.x();
+            double y = yRange.clip(toY(samples[i * step])) + rect.y();
+            if (first) { path.moveTo(x, y); first = false; }
+            else       { path.lineTo(x, y); }
         }
-    }
-    // Ensure last sample is included
-    if (count > 0 && (count - 1) % decim != 0) {
-        float s = samples[(count - 1) * step];
-        double norm = (s - mid) * invRange;
-        double x = double(w - 1);
-        double y = (1.0 - norm) * (h * 0.5);
-
-        x = xRange.clip(x) + rect.x();
-        y = yRange.clip(y) + rect.y();
-        path.lineTo(x, y);
+    } else {
+        bool first = true;
+        for (int x = 0; x < w; x++) {
+            const size_t begin = size_t(x) * count / w;
+            const size_t end = std::min(count, size_t(x + 1) * count / w);
+            float lo = std::numeric_limits<float>::infinity();
+            float hi = -std::numeric_limits<float>::infinity();
+            for (size_t i = begin; i < end; i++) {
+                float s = samples[i * step];
+                if (!std::isfinite(s)) continue;
+                lo = std::min(lo, s);
+                hi = std::max(hi, s);
+            }
+            if (lo > hi) { first = true; continue; }  // no finite samples: gap
+            double xr = xRange.clip(float(x)) + rect.x();
+            double yTop = yRange.clip(toY(hi)) + rect.y();
+            double yBot = yRange.clip(toY(lo)) + rect.y();
+            if (first) { path.moveTo(xr, yTop); first = false; }
+            else       { path.lineTo(xr, yTop); }
+            path.lineTo(xr, yBot);
+        }
     }
     painter.drawPath(path);
 }
@@ -641,26 +649,51 @@ static QImage renderFloatTrace(SampleSource<float> *src,
 
     QPainterPath path;
     bool first = true;
-    const double xStep = double(w) / double(len);
-    const size_t decim = (len > size_t(w)) ? (len + w - 1) / w : 1;
-    auto addPoint = [&](size_t i, double xCoord) {
-        double s = samples[i];
-        // Break the path at a non-finite sample (squelch / cold-start gap) so
-        // the next finite point starts a fresh subpath instead of bridging the
-        // gap with a straight line.
-        if (!std::isfinite(s)) { first = true; return; }
+    auto toY = [&](double s) {
         double norm = (s - mid) * invRange;
         if (norm >  1.0) norm =  1.0;
         if (norm < -1.0) norm = -1.0;
-        double y = (1.0 - norm) * (h * 0.5);
-        if (first) { path.moveTo(xCoord, y); first = false; }
-        else       { path.lineTo(xCoord, y); }
+        return (1.0 - norm) * (h * 0.5);
     };
-    for (size_t i = 0; i < len; i += decim) {
-        addPoint(i, i * xStep);
-    }
-    if (len > 0 && (len - 1) % decim != 0) {
-        addPoint(len - 1, w - 1);
+
+    // Same aliasing guard as TracePlot::plotTrace: draw every sample while
+    // that stays affordable, else an honest per-column min/max envelope —
+    // never single-sample decimation, which folds fast components down into
+    // convincing-looking low-frequency artefacts.
+    static const size_t maxPointsPerPixel = 16;
+    const size_t samplesPerPx = (len + w - 1) / w;
+
+    if (samplesPerPx <= maxPointsPerPixel) {
+        const double xStep = double(w) / double(len);
+        for (size_t i = 0; i < len; i++) {
+            double s = samples[i];
+            // Break the path at a non-finite sample (squelch / cold-start gap)
+            // so the next finite point starts a fresh subpath instead of
+            // bridging the gap with a straight line.
+            if (!std::isfinite(s)) { first = true; continue; }
+            double y = toY(s);
+            if (first) { path.moveTo(i * xStep, y); first = false; }
+            else       { path.lineTo(i * xStep, y); }
+        }
+    } else {
+        for (int x = 0; x < w; x++) {
+            const size_t begin = size_t(x) * len / w;
+            const size_t end = std::min(len, size_t(x + 1) * len / w);
+            double lo = std::numeric_limits<double>::infinity();
+            double hi = -std::numeric_limits<double>::infinity();
+            for (size_t i = begin; i < end; i++) {
+                double s = samples[i];
+                if (!std::isfinite(s)) continue;
+                lo = std::min(lo, s);
+                hi = std::max(hi, s);
+            }
+            if (lo > hi) { first = true; continue; }  // all-gap column
+            double yTop = toY(hi);
+            double yBot = toY(lo);
+            if (first) { path.moveTo(x, yTop); first = false; }
+            else       { path.lineTo(x, yTop); }
+            path.lineTo(x, yBot);
+        }
     }
     painter.drawPath(path);
     return image;
