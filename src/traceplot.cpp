@@ -328,23 +328,22 @@ void TracePlot::applyMinMax(QPair<double,double> result)
     // tall plot would shift by <2 px), so reject sub-tolerance updates and
     // leave globalMin/Max unchanged so the axis labels match the cached
     // image's mapping exactly.
-    const double oldRange = std::max(globalMax - globalMin, 1.0);
-    const double tol = std::max(1e-9, oldRange * 0.01);
+    // Gauge the tolerance off the larger of the old and new ranges, not off a
+    // range floored at 1.0: for a capture peaking at 0.02 a floored range made
+    // tol 0.01, half the signal's entire span, so a 40%-visible rescale was
+    // rejected outright and the plot stayed frozen at the wrong scale.
+    const double refRange = std::max({globalMax - globalMin, newMax - newMin, 1e-12});
+    const double tol = std::max(1e-12, refRange * 0.01);
     const bool significant = std::abs(newMin - globalMin) > tol ||
                              std::abs(newMax - globalMax) > tol;
     if (!significant) return;
 
-    // A cached render is only visibly wrong once the scale has moved a lot —
-    // most importantly on the very first scan, which replaces the default
-    // 0..1 with the signal's real range and would otherwise leave the trace
-    // slammed against the rails until the next pan or zoom minted a new key.
-    // 25% of range is far above the post-tuner-drag wobble the tolerance gate
-    // above already absorbs, so this re-renders when it matters and stays
-    // quiet when it doesn't.
-    const double scaleTol = std::max(1e-9, oldRange * 0.25);
-    if (std::abs(newMin - globalMin) > scaleTol ||
-        std::abs(newMax - globalMax) > scaleTol)
-        ++scaleEpoch;
+    // Invalidate the cached renders on exactly the same condition that moves
+    // globalMin/Max. A second, coarser threshold here would open a band where
+    // the axis labels paintFront draws live have moved but the cached pixels
+    // still encode the old mapping — permanently, since nothing else mints a
+    // new key. The gate above is already the churn filter.
+    ++scaleEpoch;
 
     const double prevMin = globalMin, prevMax = globalMax;
     globalMin = newMin;
@@ -475,7 +474,8 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
     QString key;
     QTextStream ts(&key);
     ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount
-       << "_" << dataEpoch << "_" << scaleEpoch << "_" << height();
+       << "_" << dataEpoch << "_" << scaleEpoch << "_" << height()
+       << "_" << tileWidthPx;
     currentFrameKeys.insert(key);
     // if we already have a cached pixmap, return it immediately
     if (QPixmapCache::find(key, &pixmap))
@@ -490,7 +490,8 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
     return pixmap;
 }
 
-void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange)
+void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange,
+                         double mid, double invRange)
 {
     // NOTE: runs on a QtConcurrent worker thread. Do not touch currentFrameKeys
     // or tasks from here — they live on the GUI thread and QSet isn't
@@ -506,12 +507,11 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
     auto firstSample = sampleRange.minimum;
     auto length = sampleRange.length();
 
-    // Snapshot the shared global range so every tile renders at the same scale.
-    double minv = globalMin;
-    double maxv = globalMax;
-    if (maxv <= minv) maxv = minv + 1.0;
-    double mid = 0.5 * (minv + maxv);
-    double invRange = 1.0 / (maxv - minv);
+    // mid/invRange are snapshotted on the GUI thread at dispatch (see
+    // schedulePendingTiles). Reading globalMin/Max here instead would be a
+    // data race against applyMinMax, and would let a scan landing mid-flight
+    // give one frame's tiles two different scales — cached under keys minted
+    // before the bump, so the amplitude step at the tile seam never clears.
 
     // Is it a 2-channel (complex) trace?
     if (auto src = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
@@ -655,8 +655,12 @@ void TracePlot::schedulePendingTiles()
         range_t<size_t> sampleRange{ tileID * sampleCount,
                                     (tileID + 1) * sampleCount };
         // launch background draw (rect size uses tilePx)
+        double minv = globalMin;
+        double maxv = globalMax;
+        if (maxv <= minv) maxv = minv + 1.0;
         QtConcurrent::run(this, &TracePlot::drawTile,
-                         key, QRect(0, 0, tilePx, height()), sampleRange);
+                         key, QRect(0, 0, tilePx, height()), sampleRange,
+                         0.5 * (minv + maxv), 1.0 / (maxv - minv));
         tasks.insert(key);
     }
 }

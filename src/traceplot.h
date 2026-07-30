@@ -105,12 +105,13 @@ private:
     // used to drive the LatencyLog message; could be repurposed if the
     // axis layer ever wants to debounce its own redraw on it.
     int minMaxEpoch = 0;
-    // Bumped only when globalMin/Max move enough to make a cached render
-    // visibly wrong (see applyMinMax). Part of both cache keys, so the very
-    // first frame — dispatched against the default 0..1 before the async scan
-    // has landed — is re-rendered once the real range arrives, while the
-    // small post-tuner-drag wobble that minMaxEpoch tracks does not churn the
-    // cache. Axis labels are drawn live from globalMin/Max either way.
+    // Bumped whenever applyMinMax actually moves globalMin/Max — i.e. on
+    // exactly the changes that get past its tolerance gate. Part of both
+    // cache keys, so a cached render can never encode a different mapping
+    // than the one paintFront is drawing axis labels from. Most visibly, the
+    // first frame is dispatched against the default 0..1 before the async
+    // scan lands; this is what re-renders it at the real range instead of
+    // leaving the trace slammed against the rails until the next pan.
     int scaleEpoch = 0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
@@ -161,7 +162,8 @@ private:
     void startFloatRender(const FloatKey &k, double mid, double invRange);
     // Request the pixmap for a given tile (width in pixels drives sample count)
     QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
-    void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);
+    void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange,
+                  double mid, double invRange);
     void plotTrace(QPainter &painter, const QRect &rect, float *samples,
                    size_t count, int step, double mid, double invRange);
 };
