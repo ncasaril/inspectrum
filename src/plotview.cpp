@@ -2264,6 +2264,15 @@ void PlotView::paintEvent(QPaintEvent *event)
             plot->paintFront(painter, rect, viewRange);
             y += plot->height();
         }
+
+        // Mirror the time-selection cursors over the derived-plot stack so the
+        // selected span lines up column-for-column with the spectrogram. The
+        // cursor positions are already in viewport coordinates, so the same
+        // paint call works here with the derived area's rect.
+        if (cursorsEnabled) {
+            QRect derivedRect(0, viewRect.height() - derivedHeight, width(), derivedHeight);
+            cursors.paintFront(painter, derivedRect, viewRange);
+        }
     }
     LatencyLog::mark("paintEvent end");
 }
