@@ -691,8 +691,14 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     // the click was in an existing derived plot, not the spectrogram).
     int tunerCentreY = -1;
     // Check if click is in derived plot area (fixed at bottom)
-    if (plots.size() > 1 && clickY >= viewportH - derivedPlotHeight) {
-        int posInDerived = clickY - (viewportH - derivedPlotHeight);
+    // The derived plots are a stack, so the band starts at the top of the
+    // whole stack — not one plot height up. Testing against a single height
+    // sent a right-click in any but the bottom plot down the spectrogram
+    // branch, which then moved the tuner to the clicked y. Matches the hit
+    // test in mouseMoveEvent.
+    const int derivedTotalH = int(plots.size() - 1) * derivedPlotHeight;
+    if (plots.size() > 1 && clickY >= viewportH - derivedTotalH) {
+        int posInDerived = clickY - (viewportH - derivedTotalH);
         plotIndex = 1 + posInDerived / derivedPlotHeight;
         if (plotIndex >= plots.size())
             return;
@@ -759,6 +765,31 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
             }
         );
         plotsMenu->addAction(action);
+    }
+
+    // Plots derived from the raw (pre-tuner) input. The normal derived plots
+    // all sit behind the TunerTransform, so low-level detail like PA ramp-up
+    // is shaped by the tuner's FIR and its placement; these bypass that and
+    // show the untouched capture. Deliberately does not touch the tuner.
+    {
+        QMenu *rawMenu = menu.addMenu("Add raw plot (pre-filter)");
+        auto rawSrc = std::static_pointer_cast<AbstractSampleSource>(spectrogramPlot->input());
+        auto rawCompatible = as_range(Plots::plots.equal_range(rawSrc->sampleType()));
+        for (auto p : rawCompatible) {
+            auto plotInfo = p.second;
+            auto action = new QAction(QString("Add raw %1").arg(plotInfo.name), rawMenu);
+            auto plotCreator = plotInfo.creator;
+            connect(
+                action, &QAction::triggered,
+                this, [=]() {
+                    addPlot(plotCreator(rawSrc));
+                    this->zoomSample = clickSample;
+                    this->zoomPos = centerX;
+                    this->updateView(true);
+                }
+            );
+            rawMenu->addAction(action);
+        }
     }
 
     // Add submenu for extracting symbols
@@ -2197,13 +2228,21 @@ void PlotView::paintEvent(QPaintEvent *event)
     specPlot->paintMid(painter, specRect, viewRange);
     specPlot->paintFront(painter, specRect, viewRange);
 
-    // Draw cursors and time scale over spectrogram
+    // Draw cursors and time scale over spectrogram. specRect spans the whole
+    // scrollable spectrogram, which extends under the derived-plot band when
+    // specHeight exceeds the visible spectrogram area — clip so the highlight
+    // fill and segment ticks stop at the band and aren't composited twice by
+    // the mirrored pass below.
+    int specViewHeight = std::max(0, viewRect.height() - derivedHeight);
+    painter.save();
+    painter.setClipRect(QRect(0, 0, width(), specViewHeight));
     if (cursorsEnabled) {
         cursors.paintFront(painter, specRect, viewRange);
     }
     if (timeScaleEnabled) {
         paintTimeScale(painter, specRect, viewRange);
     }
+    painter.restore();
 
     // Draw derived plots in a fixed area at the bottom (always visible).
     // When the file ends before the viewport's right edge (zoomed-out short
@@ -2238,6 +2277,15 @@ void PlotView::paintEvent(QPaintEvent *event)
             QRect rect(0, y, contentWidth, plot->height());
             plot->paintFront(painter, rect, viewRange);
             y += plot->height();
+        }
+
+        // Mirror the time-selection cursors over the derived-plot stack so the
+        // selected span lines up column-for-column with the spectrogram. The
+        // cursor positions are already in viewport coordinates, so the same
+        // paint call works here with the derived area's rect.
+        if (cursorsEnabled) {
+            QRect derivedRect(0, viewRect.height() - derivedHeight, contentWidth, derivedHeight);
+            cursors.paintFront(painter, derivedRect, viewRange);
         }
     }
     LatencyLog::mark("paintEvent end");

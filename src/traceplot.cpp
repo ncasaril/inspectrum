@@ -328,11 +328,22 @@ void TracePlot::applyMinMax(QPair<double,double> result)
     // tall plot would shift by <2 px), so reject sub-tolerance updates and
     // leave globalMin/Max unchanged so the axis labels match the cached
     // image's mapping exactly.
-    const double oldRange = std::max(globalMax - globalMin, 1.0);
-    const double tol = std::max(1e-9, oldRange * 0.01);
+    // Gauge the tolerance off the larger of the old and new ranges, not off a
+    // range floored at 1.0: for a capture peaking at 0.02 a floored range made
+    // tol 0.01, half the signal's entire span, so a 40%-visible rescale was
+    // rejected outright and the plot stayed frozen at the wrong scale.
+    const double refRange = std::max({globalMax - globalMin, newMax - newMin, 1e-12});
+    const double tol = std::max(1e-12, refRange * 0.01);
     const bool significant = std::abs(newMin - globalMin) > tol ||
                              std::abs(newMax - globalMax) > tol;
     if (!significant) return;
+
+    // Invalidate the cached renders on exactly the same condition that moves
+    // globalMin/Max. A second, coarser threshold here would open a band where
+    // the axis labels paintFront draws live have moved but the cached pixels
+    // still encode the old mapping — permanently, since nothing else mints a
+    // new key. The gate above is already the churn filter.
+    ++scaleEpoch;
 
     const double prevMin = globalMin, prevMax = globalMax;
     globalMin = newMin;
@@ -396,7 +407,7 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
         const size_t start = sampleRange.minimum;
         const size_t len = sampleRange.maximum - sampleRange.minimum;
 
-        FloatKey k{start, len, w, h, yScale, dataEpoch};
+        FloatKey k{start, len, w, h, yScale, dataEpoch, scaleEpoch};
         floatPendingKey_ = k;
         floatPendingValid_ = true;
 
@@ -463,7 +474,8 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
     QString key;
     QTextStream ts(&key);
     ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount
-       << "_" << dataEpoch;
+       << "_" << dataEpoch << "_" << scaleEpoch << "_" << height()
+       << "_" << tileWidthPx;
     currentFrameKeys.insert(key);
     // if we already have a cached pixmap, return it immediately
     if (QPixmapCache::find(key, &pixmap))
@@ -471,14 +483,15 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
 
     // schedule a new tile-draw if not already running or pending
     if (!tasks.contains(key) && !pendingInfo.contains(key)) {
-        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx});
+        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx, height()});
         debounceTimer->start();
     }
     pixmap.fill(Qt::transparent);
     return pixmap;
 }
 
-void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange)
+void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange,
+                         double mid, double invRange)
 {
     // NOTE: runs on a QtConcurrent worker thread. Do not touch currentFrameKeys
     // or tasks from here — they live on the GUI thread and QSet isn't
@@ -494,12 +507,11 @@ void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleR
     auto firstSample = sampleRange.minimum;
     auto length = sampleRange.length();
 
-    // Snapshot the shared global range so every tile renders at the same scale.
-    double minv = globalMin;
-    double maxv = globalMax;
-    if (maxv <= minv) maxv = minv + 1.0;
-    double mid = 0.5 * (minv + maxv);
-    double invRange = 1.0 / (maxv - minv);
+    // mid/invRange are snapshotted on the GUI thread at dispatch (see
+    // schedulePendingTiles). Reading globalMin/Max here instead would be a
+    // data race against applyMinMax, and would let a scan landing mid-flight
+    // give one frame's tiles two different scales — cached under keys minted
+    // before the bump, so the amplitude step at the tile seam never clears.
 
     // Is it a 2-channel (complex) trace?
     if (auto src = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
@@ -544,49 +556,87 @@ void TracePlot::handleImage(QString key, QImage image)
 void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
                           size_t count, int step, double mid, double invRange)
 {
-    // Build a path by down-sampling to at most one point per pixel column.
     // Scaling (mid, invRange) is supplied by the caller so all tiles share one range.
     QPainterPath path;
     const int w = rect.width();
     const int h = rect.height();
-    range_t<float> xRange{0.f, float(w - 2)};
+    if (w < 1 || h < 1 || count == 0) return;
+    // Clip x to the last drawable column, not w-2: now that the dense branch
+    // emits every sample rather than one per column, a tighter bound piles the
+    // tile's trailing samples onto a single x and draws a phantom min/max bar
+    // at every tile boundary.
+    range_t<float> xRange{0.f, float(w - 1)};
     range_t<float> yRange{0.f, float(h - 2)};
 
-    // Compute x-step per sample
-    const double xStep = double(w) / double(count);
-    // Down-sample: at most one point per pixel
-    size_t decim = 1;
-    if (size_t(w) < count)
-        decim = (count + w - 1) / w;  // ceil(count/w)
-
-    bool first = true;
-    // Plot samples at intervals of decim
-    for (size_t i = 0; i < count; i += decim) {
-        float s = samples[i * step];
+    auto toY = [&](float s) {
         double norm = (s - mid) * invRange;
-        double x = i * xStep;
-        double y = (1.0 - norm) * (h * 0.5);
+        return (1.0 - norm) * (h * 0.5);
+    };
 
-        x = xRange.clip(x) + rect.x();
-        y = yRange.clip(y) + rect.y();
+    // Picking one sample per pixel column aliases: any component faster than
+    // the pixel rate (an IQ carrier at a few px/cycle) folds down and renders
+    // as a slow, clean-looking waveform. Up to a few samples per pixel we can
+    // afford to draw every sample; denser than that no line plot can show the
+    // waveform anyway, so draw an honest per-column min/max envelope instead.
+    static const size_t maxPointsPerPixel = 16;
+    const size_t samplesPerPx = (count + w - 1) / w;
 
-        if (first) {
-            path.moveTo(x, y);
-            first = false;
-        } else {
-            path.lineTo(x, y);
+    if (samplesPerPx <= maxPointsPerPixel) {
+        const double xStep = double(w) / double(count);
+        bool first = true;
+        size_t runLen = 0;
+        double lastX = 0.0, lastY = 0.0;
+        // A run of exactly one finite sample emits a lone moveTo, and a
+        // one-element subpath draws nothing — the same invisibility the
+        // envelope branch guards against. Squelch NaNs each sample
+        // independently, so alternating NaN/finite is a real input.
+        auto endRun = [&]() {
+            if (runLen == 1 && w >= 2) {
+                double stubX = (lastX + 1.0 <= rect.x() + w - 1) ? lastX + 1.0
+                                                                 : lastX - 1.0;
+                path.lineTo(stubX, lastY);
+            }
+            first = true;
+            runLen = 0;
+        };
+        for (size_t i = 0; i < count; i++) {
+            float s = samples[i * step];
+            // Break the path at a non-finite sample, same as the envelope
+            // branch below and renderFloatTrace: clip() would otherwise fold
+            // NaN to the top of the plot and draw a full-height spike.
+            if (!std::isfinite(s)) { endRun(); continue; }
+            double x = xRange.clip(i * xStep) + rect.x();
+            double y = yRange.clip(toY(s)) + rect.y();
+            if (first) { path.moveTo(x, y); first = false; }
+            else       { path.lineTo(x, y); }
+            lastX = x; lastY = y; runLen++;
         }
-    }
-    // Ensure last sample is included
-    if (count > 0 && (count - 1) % decim != 0) {
-        float s = samples[(count - 1) * step];
-        double norm = (s - mid) * invRange;
-        double x = double(w - 1);
-        double y = (1.0 - norm) * (h * 0.5);
-
-        x = xRange.clip(x) + rect.x();
-        y = yRange.clip(y) + rect.y();
-        path.lineTo(x, y);
+        endRun();
+    } else {
+        bool first = true;
+        for (int x = 0; x < w; x++) {
+            const size_t begin = size_t(x) * count / w;
+            const size_t end = std::min(count, size_t(x + 1) * count / w);
+            float lo = std::numeric_limits<float>::infinity();
+            float hi = -std::numeric_limits<float>::infinity();
+            for (size_t i = begin; i < end; i++) {
+                float s = samples[i * step];
+                if (!std::isfinite(s)) continue;
+                lo = std::min(lo, s);
+                hi = std::max(hi, s);
+            }
+            if (lo > hi) { first = true; continue; }  // no finite samples: gap
+            double xr = xRange.clip(float(x)) + rect.x();
+            double yTop = yRange.clip(toY(hi)) + rect.y();
+            double yBot = yRange.clip(toY(lo)) + rect.y();
+            // A column holding a single sample gives yTop == yBot. Starting a
+            // subpath with a zero-length line draws nothing under a flat cap,
+            // so isolated bursts after a gap would vanish — give it 1px.
+            if (yBot - yTop < 1.0) yBot = yTop + 1.0;
+            if (first) { path.moveTo(xr, yTop); first = false; }
+            else       { path.lineTo(xr, yTop); }
+            path.lineTo(xr, yBot);
+        }
     }
     painter.drawPath(path);
 }
@@ -602,11 +652,16 @@ void TracePlot::schedulePendingTiles()
         size_t tileID = it.value().tileID;
         size_t sampleCount = it.value().sampleCount;
         int tilePx = it.value().tileWidth;
+        int tileH = it.value().tileHeight;
         range_t<size_t> sampleRange{ tileID * sampleCount,
                                     (tileID + 1) * sampleCount };
         // launch background draw (rect size uses tilePx)
+        double minv = globalMin;
+        double maxv = globalMax;
+        if (maxv <= minv) maxv = minv + 1.0;
         QtConcurrent::run(this, &TracePlot::drawTile,
-                         key, QRect(0, 0, tilePx, height()), sampleRange);
+                         key, QRect(0, 0, tilePx, tileH), sampleRange,
+                         0.5 * (minv + maxv), 1.0 / (maxv - minv));
         tasks.insert(key);
     }
 }
@@ -641,26 +696,74 @@ static QImage renderFloatTrace(SampleSource<float> *src,
 
     QPainterPath path;
     bool first = true;
-    const double xStep = double(w) / double(len);
-    const size_t decim = (len > size_t(w)) ? (len + w - 1) / w : 1;
-    auto addPoint = [&](size_t i, double xCoord) {
-        double s = samples[i];
-        // Break the path at a non-finite sample (squelch / cold-start gap) so
-        // the next finite point starts a fresh subpath instead of bridging the
-        // gap with a straight line.
-        if (!std::isfinite(s)) { first = true; return; }
+    auto toY = [&](double s) {
         double norm = (s - mid) * invRange;
         if (norm >  1.0) norm =  1.0;
         if (norm < -1.0) norm = -1.0;
-        double y = (1.0 - norm) * (h * 0.5);
-        if (first) { path.moveTo(xCoord, y); first = false; }
-        else       { path.lineTo(xCoord, y); }
+        return (1.0 - norm) * (h * 0.5);
     };
-    for (size_t i = 0; i < len; i += decim) {
-        addPoint(i, i * xStep);
-    }
-    if (len > 0 && (len - 1) % decim != 0) {
-        addPoint(len - 1, w - 1);
+
+    // Same aliasing guard as TracePlot::plotTrace: draw every sample while
+    // that stays affordable, else an honest per-column min/max envelope —
+    // never single-sample decimation, which folds fast components down into
+    // convincing-looking low-frequency artefacts.
+    static const size_t maxPointsPerPixel = 16;
+    const size_t samplesPerPx = (len + w - 1) / w;
+
+    if (samplesPerPx <= maxPointsPerPixel) {
+        const double xStep = double(w) / double(len);
+        size_t runLen = 0;
+        double lastX = 0.0, lastY = 0.0;
+        // Same one-element-subpath hazard as the envelope branch below: a lone
+        // finite sample between two squelch NaNs would otherwise draw nothing.
+        auto endRun = [&]() {
+            if (runLen == 1 && w >= 2) {
+                double stubX = (lastX + 1.0 <= w - 1) ? lastX + 1.0 : lastX - 1.0;
+                path.lineTo(stubX, lastY);
+            }
+            first = true;
+            runLen = 0;
+        };
+        for (size_t i = 0; i < len; i++) {
+            double s = samples[i];
+            // Break the path at a non-finite sample (squelch / cold-start gap)
+            // so the next finite point starts a fresh subpath instead of
+            // bridging the gap with a straight line.
+            if (!std::isfinite(s)) { endRun(); continue; }
+            double y = toY(s);
+            double x = i * xStep;
+            if (first) { path.moveTo(x, y); first = false; }
+            else       { path.lineTo(x, y); }
+            lastX = x; lastY = y; runLen++;
+        }
+        endRun();
+    } else {
+        for (int x = 0; x < w; x++) {
+            const size_t begin = size_t(x) * len / w;
+            const size_t end = std::min(len, size_t(x + 1) * len / w);
+            double lo = std::numeric_limits<double>::infinity();
+            double hi = -std::numeric_limits<double>::infinity();
+            for (size_t i = begin; i < end; i++) {
+                double s = samples[i];
+                if (!std::isfinite(s)) continue;
+                lo = std::min(lo, s);
+                hi = std::max(hi, s);
+            }
+            if (lo > hi) { first = true; continue; }  // all-gap column
+            double yTop = toY(hi);
+            double yBot = toY(lo);
+            // Single-sample column: a zero-length subpath draws nothing, so an
+            // isolated burst after a squelch gap would be invisible. toY only
+            // clamps to [0, h], so pull yTop up first or a burst sitting at the
+            // bottom of the range extends past the last row and draws faint.
+            if (yBot - yTop < 1.0) {
+                yTop = std::min(yTop, double(h) - 1.0);
+                yBot = yTop + 1.0;
+            }
+            if (first) { path.moveTo(x, yTop); first = false; }
+            else       { path.lineTo(x, yTop); }
+            path.lineTo(x, yBot);
+        }
     }
     painter.drawPath(path);
     return image;
@@ -700,7 +803,12 @@ void TracePlot::onFloatImageReady()
         double maxv = globalMax;
         if (maxv <= minv) maxv = minv + 1.0;
         double mid = 0.5 * (minv + maxv);
-        double invRange = yScale / (maxv - minv);
+        // Scale from the key we are about to render, not from the live member.
+        // dataEpoch and scaleEpoch are monotonic, so a mismatch there can only
+        // produce an image keyed to a generation that is never minted again —
+        // but yScale is not, so reading it live would cache a wheel-zoomed
+        // image under the pre-zoom key and blit it back when the user returns.
+        double invRange = floatPendingKey_.yScale / (maxv - minv);
         startFloatRender(floatPendingKey_, mid, invRange);
     }
     emit repaint();

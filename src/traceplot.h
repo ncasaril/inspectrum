@@ -75,8 +75,13 @@ private slots:
 private:
     // In-process tile keys
     QSet<QString> tasks;
-    // Tiles waiting to be scheduled: key -> (tileID, sampleCount, tileWidthPx)
-    struct PendingInfo { size_t tileID; size_t sampleCount; int tileWidth; };
+    // Tiles waiting to be scheduled: key -> (tileID, sampleCount, tileWidthPx,
+    // tileHeightPx). The height is captured with the key rather than read at
+    // dispatch: the derived-plot height slider can move during the debounce
+    // window, and rendering at the new height under a key minted for the old
+    // one caches a pixmap that paintMid later blits with a mismatched source
+    // rect.
+    struct PendingInfo { size_t tileID; size_t sampleCount; int tileWidth; int tileHeight; };
     QHash<QString, PendingInfo> pendingInfo;
     // Keys desired in the current paint frame (for early-exit)
     QSet<QString> currentFrameKeys;
@@ -105,6 +110,14 @@ private:
     // used to drive the LatencyLog message; could be repurposed if the
     // axis layer ever wants to debounce its own redraw on it.
     int minMaxEpoch = 0;
+    // Bumped whenever applyMinMax actually moves globalMin/Max — i.e. on
+    // exactly the changes that get past its tolerance gate. Part of both
+    // cache keys, so a cached render can never encode a different mapping
+    // than the one paintFront is drawing axis labels from. Most visibly, the
+    // first frame is dispatched against the default 0..1 before the async
+    // scan lands; this is what re-renders it at the real range instead of
+    // leaving the trace slammed against the rails until the next pan.
+    int scaleEpoch = 0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
     const int defaultTileWidth = 1000;
@@ -129,9 +142,10 @@ private:
         int      h     = 0;
         double   yScale = 1.0;
         int      epoch = 0;   // mirrors TracePlot::dataEpoch
+        int      scale = 0;   // mirrors TracePlot::scaleEpoch
         bool operator==(const FloatKey &o) const {
             return start==o.start && len==o.len && w==o.w && h==o.h
-                && yScale==o.yScale && epoch==o.epoch;
+                && yScale==o.yScale && epoch==o.epoch && scale==o.scale;
         }
         bool operator!=(const FloatKey &o) const { return !(*this == o); }
     };
@@ -153,7 +167,8 @@ private:
     void startFloatRender(const FloatKey &k, double mid, double invRange);
     // Request the pixmap for a given tile (width in pixels drives sample count)
     QPixmap getTile(size_t tileID, size_t sampleCount, int tileWidthPx);
-    void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange);
+    void drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange,
+                  double mid, double invRange);
     void plotTrace(QPainter &painter, const QRect &rect, float *samples,
                    size_t count, int step, double mid, double invRange);
 };
