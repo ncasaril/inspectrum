@@ -2222,13 +2222,21 @@ void PlotView::paintEvent(QPaintEvent *event)
     specPlot->paintMid(painter, specRect, viewRange);
     specPlot->paintFront(painter, specRect, viewRange);
 
-    // Draw cursors and time scale over spectrogram
+    // Draw cursors and time scale over spectrogram. specRect spans the whole
+    // scrollable spectrogram, which extends under the derived-plot band when
+    // specHeight exceeds the visible spectrogram area — clip so the highlight
+    // fill and segment ticks stop at the band and aren't composited twice by
+    // the mirrored pass below.
+    int specViewHeight = std::max(0, viewRect.height() - derivedHeight);
+    painter.save();
+    painter.setClipRect(QRect(0, 0, width(), specViewHeight));
     if (cursorsEnabled) {
         cursors.paintFront(painter, specRect, viewRange);
     }
     if (timeScaleEnabled) {
         paintTimeScale(painter, specRect, viewRange);
     }
+    painter.restore();
 
     // Draw derived plots in a fixed area at the bottom (always visible).
     // When the file ends before the viewport's right edge (zoomed-out short
@@ -2270,7 +2278,7 @@ void PlotView::paintEvent(QPaintEvent *event)
         // cursor positions are already in viewport coordinates, so the same
         // paint call works here with the derived area's rect.
         if (cursorsEnabled) {
-            QRect derivedRect(0, viewRect.height() - derivedHeight, width(), derivedHeight);
+            QRect derivedRect(0, viewRect.height() - derivedHeight, contentWidth, derivedHeight);
             cursors.paintFront(painter, derivedRect, viewRange);
         }
     }

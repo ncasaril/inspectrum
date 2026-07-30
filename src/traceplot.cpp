@@ -549,7 +549,11 @@ void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
     const int w = rect.width();
     const int h = rect.height();
     if (w < 1 || h < 1 || count == 0) return;
-    range_t<float> xRange{0.f, float(w - 2)};
+    // Clip x to the last drawable column, not w-2: now that the dense branch
+    // emits every sample rather than one per column, a tighter bound piles the
+    // tile's trailing samples onto a single x and draws a phantom min/max bar
+    // at every tile boundary.
+    range_t<float> xRange{0.f, float(w - 1)};
     range_t<float> yRange{0.f, float(h - 2)};
 
     auto toY = [&](float s) {
@@ -569,8 +573,13 @@ void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
         const double xStep = double(w) / double(count);
         bool first = true;
         for (size_t i = 0; i < count; i++) {
+            float s = samples[i * step];
+            // Break the path at a non-finite sample, same as the envelope
+            // branch below and renderFloatTrace: clip() would otherwise fold
+            // NaN to the top of the plot and draw a full-height spike.
+            if (!std::isfinite(s)) { first = true; continue; }
             double x = xRange.clip(i * xStep) + rect.x();
-            double y = yRange.clip(toY(samples[i * step])) + rect.y();
+            double y = yRange.clip(toY(s)) + rect.y();
             if (first) { path.moveTo(x, y); first = false; }
             else       { path.lineTo(x, y); }
         }
@@ -591,6 +600,10 @@ void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
             double xr = xRange.clip(float(x)) + rect.x();
             double yTop = yRange.clip(toY(hi)) + rect.y();
             double yBot = yRange.clip(toY(lo)) + rect.y();
+            // A column holding a single sample gives yTop == yBot. Starting a
+            // subpath with a zero-length line draws nothing under a flat cap,
+            // so isolated bursts after a gap would vanish — give it 1px.
+            if (yBot - yTop < 1.0) yBot = yTop + 1.0;
             if (first) { path.moveTo(xr, yTop); first = false; }
             else       { path.lineTo(xr, yTop); }
             path.lineTo(xr, yBot);
@@ -690,6 +703,9 @@ static QImage renderFloatTrace(SampleSource<float> *src,
             if (lo > hi) { first = true; continue; }  // all-gap column
             double yTop = toY(hi);
             double yBot = toY(lo);
+            // Single-sample column: a zero-length subpath draws nothing, so an
+            // isolated burst after a squelch gap would be invisible.
+            if (yBot - yTop < 1.0) yBot = yTop + 1.0;
             if (first) { path.moveTo(x, yTop); first = false; }
             else       { path.lineTo(x, yTop); }
             path.lineTo(x, yBot);
