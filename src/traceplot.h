@@ -75,8 +75,13 @@ private slots:
 private:
     // In-process tile keys
     QSet<QString> tasks;
-    // Tiles waiting to be scheduled: key -> (tileID, sampleCount, tileWidthPx)
-    struct PendingInfo { size_t tileID; size_t sampleCount; int tileWidth; };
+    // Tiles waiting to be scheduled: key -> (tileID, sampleCount, tileWidthPx,
+    // tileHeightPx). The height is captured with the key rather than read at
+    // dispatch: the derived-plot height slider can move during the debounce
+    // window, and rendering at the new height under a key minted for the old
+    // one caches a pixmap that paintMid later blits with a mismatched source
+    // rect.
+    struct PendingInfo { size_t tileID; size_t sampleCount; int tileWidth; int tileHeight; };
     QHash<QString, PendingInfo> pendingInfo;
     // Keys desired in the current paint frame (for early-exit)
     QSet<QString> currentFrameKeys;

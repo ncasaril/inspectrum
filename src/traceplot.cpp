@@ -483,7 +483,7 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
 
     // schedule a new tile-draw if not already running or pending
     if (!tasks.contains(key) && !pendingInfo.contains(key)) {
-        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx});
+        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx, height()});
         debounceTimer->start();
     }
     pixmap.fill(Qt::transparent);
@@ -652,6 +652,7 @@ void TracePlot::schedulePendingTiles()
         size_t tileID = it.value().tileID;
         size_t sampleCount = it.value().sampleCount;
         int tilePx = it.value().tileWidth;
+        int tileH = it.value().tileHeight;
         range_t<size_t> sampleRange{ tileID * sampleCount,
                                     (tileID + 1) * sampleCount };
         // launch background draw (rect size uses tilePx)
@@ -659,7 +660,7 @@ void TracePlot::schedulePendingTiles()
         double maxv = globalMax;
         if (maxv <= minv) maxv = minv + 1.0;
         QtConcurrent::run(this, &TracePlot::drawTile,
-                         key, QRect(0, 0, tilePx, height()), sampleRange,
+                         key, QRect(0, 0, tilePx, tileH), sampleRange,
                          0.5 * (minv + maxv), 1.0 / (maxv - minv));
         tasks.insert(key);
     }
@@ -802,7 +803,12 @@ void TracePlot::onFloatImageReady()
         double maxv = globalMax;
         if (maxv <= minv) maxv = minv + 1.0;
         double mid = 0.5 * (minv + maxv);
-        double invRange = yScale / (maxv - minv);
+        // Scale from the key we are about to render, not from the live member.
+        // dataEpoch and scaleEpoch are monotonic, so a mismatch there can only
+        // produce an image keyed to a generation that is never minted again —
+        // but yScale is not, so reading it live would cache a wheel-zoomed
+        // image under the pre-zoom key and blit it back when the user returns.
+        double invRange = floatPendingKey_.yScale / (maxv - minv);
         startFloatRender(floatPendingKey_, mid, invRange);
     }
     emit repaint();
