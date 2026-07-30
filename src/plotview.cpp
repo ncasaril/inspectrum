@@ -691,8 +691,14 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
     // the click was in an existing derived plot, not the spectrogram).
     int tunerCentreY = -1;
     // Check if click is in derived plot area (fixed at bottom)
-    if (plots.size() > 1 && clickY >= viewportH - derivedPlotHeight) {
-        int posInDerived = clickY - (viewportH - derivedPlotHeight);
+    // The derived plots are a stack, so the band starts at the top of the
+    // whole stack — not one plot height up. Testing against a single height
+    // sent a right-click in any but the bottom plot down the spectrogram
+    // branch, which then moved the tuner to the clicked y. Matches the hit
+    // test in mouseMoveEvent.
+    const int derivedTotalH = int(plots.size() - 1) * derivedPlotHeight;
+    if (plots.size() > 1 && clickY >= viewportH - derivedTotalH) {
+        int posInDerived = clickY - (viewportH - derivedTotalH);
         plotIndex = 1 + posInDerived / derivedPlotHeight;
         if (plotIndex >= plots.size())
             return;

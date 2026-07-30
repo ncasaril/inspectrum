@@ -334,6 +334,18 @@ void TracePlot::applyMinMax(QPair<double,double> result)
                              std::abs(newMax - globalMax) > tol;
     if (!significant) return;
 
+    // A cached render is only visibly wrong once the scale has moved a lot —
+    // most importantly on the very first scan, which replaces the default
+    // 0..1 with the signal's real range and would otherwise leave the trace
+    // slammed against the rails until the next pan or zoom minted a new key.
+    // 25% of range is far above the post-tuner-drag wobble the tolerance gate
+    // above already absorbs, so this re-renders when it matters and stays
+    // quiet when it doesn't.
+    const double scaleTol = std::max(1e-9, oldRange * 0.25);
+    if (std::abs(newMin - globalMin) > scaleTol ||
+        std::abs(newMax - globalMax) > scaleTol)
+        ++scaleEpoch;
+
     const double prevMin = globalMin, prevMax = globalMax;
     globalMin = newMin;
     globalMax = newMax;
@@ -396,7 +408,7 @@ void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleR
         const size_t start = sampleRange.minimum;
         const size_t len = sampleRange.maximum - sampleRange.minimum;
 
-        FloatKey k{start, len, w, h, yScale, dataEpoch};
+        FloatKey k{start, len, w, h, yScale, dataEpoch, scaleEpoch};
         floatPendingKey_ = k;
         floatPendingValid_ = true;
 
@@ -463,7 +475,7 @@ QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
     QString key;
     QTextStream ts(&key);
     ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount
-       << "_" << dataEpoch;
+       << "_" << dataEpoch << "_" << scaleEpoch << "_" << height();
     currentFrameKeys.insert(key);
     // if we already have a cached pixmap, return it immediately
     if (QPixmapCache::find(key, &pixmap))
@@ -572,17 +584,34 @@ void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
     if (samplesPerPx <= maxPointsPerPixel) {
         const double xStep = double(w) / double(count);
         bool first = true;
+        size_t runLen = 0;
+        double lastX = 0.0, lastY = 0.0;
+        // A run of exactly one finite sample emits a lone moveTo, and a
+        // one-element subpath draws nothing — the same invisibility the
+        // envelope branch guards against. Squelch NaNs each sample
+        // independently, so alternating NaN/finite is a real input.
+        auto endRun = [&]() {
+            if (runLen == 1 && w >= 2) {
+                double stubX = (lastX + 1.0 <= rect.x() + w - 1) ? lastX + 1.0
+                                                                 : lastX - 1.0;
+                path.lineTo(stubX, lastY);
+            }
+            first = true;
+            runLen = 0;
+        };
         for (size_t i = 0; i < count; i++) {
             float s = samples[i * step];
             // Break the path at a non-finite sample, same as the envelope
             // branch below and renderFloatTrace: clip() would otherwise fold
             // NaN to the top of the plot and draw a full-height spike.
-            if (!std::isfinite(s)) { first = true; continue; }
+            if (!std::isfinite(s)) { endRun(); continue; }
             double x = xRange.clip(i * xStep) + rect.x();
             double y = yRange.clip(toY(s)) + rect.y();
             if (first) { path.moveTo(x, y); first = false; }
             else       { path.lineTo(x, y); }
+            lastX = x; lastY = y; runLen++;
         }
+        endRun();
     } else {
         bool first = true;
         for (int x = 0; x < w; x++) {
@@ -678,16 +707,31 @@ static QImage renderFloatTrace(SampleSource<float> *src,
 
     if (samplesPerPx <= maxPointsPerPixel) {
         const double xStep = double(w) / double(len);
+        size_t runLen = 0;
+        double lastX = 0.0, lastY = 0.0;
+        // Same one-element-subpath hazard as the envelope branch below: a lone
+        // finite sample between two squelch NaNs would otherwise draw nothing.
+        auto endRun = [&]() {
+            if (runLen == 1 && w >= 2) {
+                double stubX = (lastX + 1.0 <= w - 1) ? lastX + 1.0 : lastX - 1.0;
+                path.lineTo(stubX, lastY);
+            }
+            first = true;
+            runLen = 0;
+        };
         for (size_t i = 0; i < len; i++) {
             double s = samples[i];
             // Break the path at a non-finite sample (squelch / cold-start gap)
             // so the next finite point starts a fresh subpath instead of
             // bridging the gap with a straight line.
-            if (!std::isfinite(s)) { first = true; continue; }
+            if (!std::isfinite(s)) { endRun(); continue; }
             double y = toY(s);
-            if (first) { path.moveTo(i * xStep, y); first = false; }
-            else       { path.lineTo(i * xStep, y); }
+            double x = i * xStep;
+            if (first) { path.moveTo(x, y); first = false; }
+            else       { path.lineTo(x, y); }
+            lastX = x; lastY = y; runLen++;
         }
+        endRun();
     } else {
         for (int x = 0; x < w; x++) {
             const size_t begin = size_t(x) * len / w;
@@ -704,8 +748,13 @@ static QImage renderFloatTrace(SampleSource<float> *src,
             double yTop = toY(hi);
             double yBot = toY(lo);
             // Single-sample column: a zero-length subpath draws nothing, so an
-            // isolated burst after a squelch gap would be invisible.
-            if (yBot - yTop < 1.0) yBot = yTop + 1.0;
+            // isolated burst after a squelch gap would be invisible. toY only
+            // clamps to [0, h], so pull yTop up first or a burst sitting at the
+            // bottom of the range extends past the last row and draws faint.
+            if (yBot - yTop < 1.0) {
+                yTop = std::min(yTop, double(h) - 1.0);
+                yBot = yTop + 1.0;
+            }
             if (first) { path.moveTo(x, yTop); first = false; }
             else       { path.lineTo(x, yTop); }
             path.lineTo(x, yBot);

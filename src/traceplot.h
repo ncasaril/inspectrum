@@ -105,6 +105,13 @@ private:
     // used to drive the LatencyLog message; could be repurposed if the
     // axis layer ever wants to debounce its own redraw on it.
     int minMaxEpoch = 0;
+    // Bumped only when globalMin/Max move enough to make a cached render
+    // visibly wrong (see applyMinMax). Part of both cache keys, so the very
+    // first frame — dispatched against the default 0..1 before the async scan
+    // has landed — is re-rendered once the real range arrives, while the
+    // small post-tuner-drag wobble that minMaxEpoch tracks does not churn the
+    // cache. Axis labels are drawn live from globalMin/Max either way.
+    int scaleEpoch = 0;
     // Width of each tile in pixels
     // default tile width in pixels (fallback)
     const int defaultTileWidth = 1000;
@@ -129,9 +136,10 @@ private:
         int      h     = 0;
         double   yScale = 1.0;
         int      epoch = 0;   // mirrors TracePlot::dataEpoch
+        int      scale = 0;   // mirrors TracePlot::scaleEpoch
         bool operator==(const FloatKey &o) const {
             return start==o.start && len==o.len && w==o.w && h==o.h
-                && yScale==o.yScale && epoch==o.epoch;
+                && yScale==o.yScale && epoch==o.epoch && scale==o.scale;
         }
         bool operator!=(const FloatKey &o) const { return !(*this == o); }
     };
