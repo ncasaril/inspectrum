@@ -68,6 +68,13 @@ public:
     bool spectrogramScreenBand(int &topGlobal, int &heightOut,
                                int *visibleBottomGlobal = nullptr);
 
+    // Spectrum column source. Off (the default) the spectrum views follow the
+    // pointer; on, they read a draggable vertical marker line instead, so the
+    // trace holds still while the mouse goes elsewhere. Enabling seeds the
+    // marker at the column currently being shown.
+    bool spectrumMarkerEnabled() const { return spectrumMarkerOn; }
+    void setSpectrumMarkerEnabled(bool on);
+
 signals:
     void timeSelectionChanged(float time);
     void zoomIn();
@@ -171,6 +178,18 @@ private:
     // spectrum side views display. Dedicated to the side views rather than
     // shared with the hover readout, which tracks more state than this needs.
     int spectrumPointerX = 0;
+    // Draggable marker line that can replace pointer-following (see
+    // setSpectrumMarkerEnabled). Held as a sample so it stays put across pan
+    // and zoom rather than drifting with the viewport.
+    bool spectrumMarkerOn = false;
+    size_t spectrumMarkerSample = 0;
+    bool spectrumMarkerDragging = false;
+    // Viewport x of the marker, or -1 when disabled. Not clamped: an off-screen
+    // marker returns a coordinate outside the viewport so callers can tell.
+    int spectrumMarkerX();
+    // True if x is within grab distance of the marker line.
+    bool overSpectrumMarker(int x);
+    void paintSpectrumMarker(QPainter &painter, const QRect &viewRect);
     range_t<size_t> viewRange;
     range_t<size_t> selectedSamples;
     int zoomPos;

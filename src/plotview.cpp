@@ -57,6 +57,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPainter>
+#include <QPainterPath>
 #include <QProgressDialog>
 #include <QRadioButton>
 #include <QScrollBar>
@@ -540,9 +541,76 @@ void PlotView::updateSpectrumPlots()
     if (spectrumPlots.empty())
         return;
 
-    size_t sample = columnToSample(horizontalScrollBar()->value() + spectrumPointerX);
+    // With the marker on, the column is pinned to it and the pointer is ignored,
+    // so the trace holds still while the mouse is used for anything else.
+    size_t sample = spectrumMarkerOn
+        ? spectrumMarkerSample
+        : columnToSample(horizontalScrollBar()->value() + spectrumPointerX);
     for (auto plot : spectrumPlots)
         plot->setSample(sample);
+}
+
+void PlotView::setSpectrumMarkerEnabled(bool on)
+{
+    if (on == spectrumMarkerOn)
+        return;
+    spectrumMarkerOn = on;
+    if (on) {
+        // Drop the marker on the column the views are already showing, so
+        // turning it on freezes what is on screen rather than jumping.
+        spectrumMarkerSample =
+            columnToSample(horizontalScrollBar()->value() + spectrumPointerX);
+    } else {
+        spectrumMarkerDragging = false;
+    }
+    updateSpectrumPlots();
+    viewport()->update();
+}
+
+int PlotView::spectrumMarkerX()
+{
+    if (!spectrumMarkerOn)
+        return -1;
+    return sampleToColumn(spectrumMarkerSample) - horizontalScrollBar()->value();
+}
+
+bool PlotView::overSpectrumMarker(int x)
+{
+    if (!spectrumMarkerOn)
+        return false;
+    const int mx = spectrumMarkerX();
+    return std::abs(x - mx) <= 4;
+}
+
+void PlotView::paintSpectrumMarker(QPainter &painter, const QRect &viewRect)
+{
+    if (!spectrumMarkerOn)
+        return;
+    const int x = spectrumMarkerX();
+    if (x < 0 || x > viewRect.width())
+        return;
+
+    painter.save();
+    // Full-height so the marked column can be read against the derived plots
+    // too, not just the spectrogram.
+    QColor line(0, 200, 255);
+    painter.setPen(QPen(line, spectrumMarkerDragging ? 2 : 1, Qt::SolidLine));
+    painter.drawLine(x, 0, x, viewRect.height());
+
+    // Grab handle at the top: a filled tab wide enough to hit comfortably,
+    // which also advertises that the line is draggable.
+    const int hw = 5, hh = 10;
+    QPainterPath handle;
+    handle.moveTo(x - hw, 0);
+    handle.lineTo(x + hw, 0);
+    handle.lineTo(x + hw, hh - 4);
+    handle.lineTo(x, hh);
+    handle.lineTo(x - hw, hh - 4);
+    handle.closeSubpath();
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(line);
+    painter.drawPath(handle);
+    painter.restore();
 }
 
 bool PlotView::spectrogramScreenBand(int &topGlobal, int &heightOut,
@@ -1770,6 +1838,41 @@ bool PlotView::viewportEvent(QEvent *event) {
         }
     }
 
+    // Spectrum marker drag. Sits ahead of the annotation and per-plot handlers
+    // so grabbing the line never also moves the tuner or starts an annotation,
+    // but behind the band-select above, which owns the mouse outright while
+    // armed. Only a plain left-press on the line itself is claimed, so every
+    // other gesture behaves exactly as before.
+    if (spectrumMarkerOn) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton && me->modifiers() == Qt::NoModifier
+                    && overSpectrumMarker(me->pos().x())) {
+                spectrumMarkerDragging = true;
+                viewport()->setCursor(Qt::SplitHCursor);
+                return true;
+            }
+        } else if (spectrumMarkerDragging && event->type() == QEvent::MouseMove) {
+            const int x = static_cast<QMouseEvent*>(event)->pos().x();
+            spectrumMarkerSample =
+                columnToSample(std::max(0, x + horizontalScrollBar()->value()));
+            updateSpectrumPlots();
+            viewport()->update();
+            return true;
+        } else if (spectrumMarkerDragging
+                   && event->type() == QEvent::MouseButtonRelease) {
+            spectrumMarkerDragging = false;
+            viewport()->unsetCursor();
+            return true;
+        } else if (!spectrumMarkerDragging && event->type() == QEvent::MouseMove) {
+            // Hover affordance only — the move is not consumed, so the readout
+            // and annotation hover below still run.
+            auto *me = static_cast<QMouseEvent*>(event);
+            if (overSpectrumMarker(me->pos().x()))
+                viewport()->setCursor(Qt::SplitHCursor);
+        }
+    }
+
     // Shift+left-drag on the spectrogram → new annotation; plain left-press on
     // an existing annotation's box/handles → move/resize it. Both run before the
     // per-plot dispatch so they don't drag the tuner. Hover (no button) shows
@@ -2403,6 +2506,10 @@ void PlotView::paintEvent(QPaintEvent *event)
             cursors.paintFront(painter, derivedRect, viewRange);
         }
     }
+
+    // Last, so the marker sits above the spectrogram, the derived plots and the
+    // cursors — it is a pointer for reading them, not part of any one of them.
+    paintSpectrumMarker(painter, viewRect);
     LatencyLog::mark("paintEvent end");
 }
 

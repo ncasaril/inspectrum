@@ -267,6 +267,20 @@ void SpectrumView::contextMenuEvent(QContextMenuEvent *event)
     save->setEnabled(hasSample);
     menu.addAction(save);
 
+    // Pointer-following vs a draggable marker line on the spectrogram. The
+    // marker is a property of the PlotView (one line, shared by every spectrum
+    // view), so this reads and writes it there rather than holding local state.
+    if (plotView != nullptr) {
+        auto marker = new QAction("Lock to marker line", &menu);
+        marker->setCheckable(true);
+        marker->setChecked(plotView->spectrumMarkerEnabled());
+        connect(marker, &QAction::toggled, this, [this](bool on) {
+            plotView->setSpectrumMarkerEnabled(on);
+            update();
+        });
+        menu.addAction(marker);
+    }
+
     // Toggle the neighbouring-column overlay (persistence fan).
     auto persistence = new QAction("Persistence", &menu);
     persistence->setCheckable(true);
