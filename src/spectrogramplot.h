@@ -90,6 +90,22 @@ public:
     void paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange) override;
     bool mouseEvent(QEvent::Type type, QMouseEvent event) override;
     std::shared_ptr<SampleSource<std::complex<float>>> input() { return inputSource; };
+    // Accessors used by the standalone spectrum (PSD) window. getSpectrumLine()
+    // returns the same per-column power (dB) the spectrogram renders, one value
+    // per bin from -Fs/2 (index 0) to +Fs/2 (index fftSize-1) — including the
+    // reassigned modes, so the side trace always matches what is drawn.
+    std::vector<float> getSpectrumLine(size_t sample);
+    int getColumnStride() { return getStride(); }  // samples between adjacent columns
+    int getFFTSize() { return fftSize; }
+    float getPowerMin() { return powerMin; }
+    float getPowerMax() { return powerMax; }
+    double getSampleRate() { return sampleRate; }
+    bool isRealSignal() { return inputSource->realSignal(); }
+    // Bumped whenever a setting that changes rendered pixel values is applied
+    // (mode, reassignment floor, window, splat). SpectrumView keys its cache on
+    // it so a mode change can't leave a stale trace beside a redrawn
+    // spectrogram.
+    unsigned renderEpoch() const { return renderEpoch_; }
     void setSampleRate(double sampleRate);
     bool tunerEnabled();
     // Tuner offset (Hz) from the file's centre frequency: positive = shifted
@@ -181,6 +197,9 @@ private:
     bool sigmfAnnotationLabels;
     bool sigmfAnnotationColors;
     SpectrogramMode mode = SpectrogramMode::Standard;
+    // See renderEpoch(). Bumped by the mode / floor / window / splat setters so
+    // views that cache getSpectrumLine() results can tell their copy is stale.
+    unsigned renderEpoch_ = 0;
     // Bins below this power (dB, same scale as powerMax/powerMin) are not
     // reassigned. Default -80 dB matches the Auger-Flandrin recommendation
     // for visualisation and keeps noise speckle out of the reassigned image.

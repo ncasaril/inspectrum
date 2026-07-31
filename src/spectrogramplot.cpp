@@ -843,6 +843,29 @@ void SpectrogramPlot::getLine(float *dest, size_t sample)
     }
 }
 
+std::vector<float> SpectrogramPlot::getSpectrumLine(size_t sample)
+{
+    // Source the column out of the same mode-aware, cached tile the spectrogram
+    // paints from. getLine() would have been simpler but always does one plain
+    // windowed FFT, so in Reassigned mode the side trace would show ordinary
+    // |STFT|² beside a reassigned spectrogram — right-looking, but not what is
+    // drawn. Going through getFFTTile() also means sweeping the pointer across a
+    // tile costs no extra FFTs, instead of one per column.
+    std::vector<float> line(fftSize);
+    const size_t stride = (size_t)getStride();
+    const size_t tileStride = stride * (size_t)linesPerTile();
+    if (fftSize <= 0 || stride == 0 || tileStride == 0) {
+        std::fill(line.begin(), line.end(), -std::numeric_limits<float>::infinity());
+        return line;
+    }
+    const size_t tile = (sample / tileStride) * tileStride;
+    const size_t column = (sample - tile) / stride;   // < linesPerTile() by construction
+    const float *fftTile = getFFTTile(tile);
+    const float *col = &fftTile[column * (size_t)fftSize];
+    std::copy(col, col + fftSize, line.begin());
+    return line;
+}
+
 int SpectrogramPlot::getStride()
 {
     return fftSize * nfftSkip / zoomLevel;
@@ -946,6 +969,7 @@ void SpectrogramPlot::setSpectrogramMode(int newMode)
                             : SpectrogramMode::Standard;
     if (m == mode) return;
     mode = m;
+    ++renderEpoch_;
     // Cache keys include the mode, so old tiles will sit unused; clear
     // them to free the budget for the new render path.
     pixmapCache.clear();
@@ -957,6 +981,7 @@ void SpectrogramPlot::setReassignmentFloor(int floorDb)
 {
     if (floorDb == reassignmentFloorDb) return;
     reassignmentFloorDb = floorDb;
+    ++renderEpoch_;
     if (mode != SpectrogramMode::Reassigned) return;
     pixmapCache.clear();
     fftCache.clear();
@@ -970,6 +995,7 @@ void SpectrogramPlot::setWindowType(int wt)
                        : WindowType::Hann;
     if (w == windowType) return;
     windowType = w;
+    ++renderEpoch_;
     rebuildWindows();
     if (mode != SpectrogramMode::Reassigned) return;
     pixmapCache.clear();
@@ -984,6 +1010,7 @@ void SpectrogramPlot::setSplatMethod(int sm)
                         : SplatMethod::Bilinear;
     if (s == splatMethod) return;
     splatMethod = s;
+    ++renderEpoch_;
     if (mode != SpectrogramMode::Reassigned) return;
     pixmapCache.clear();
     fftCache.clear();

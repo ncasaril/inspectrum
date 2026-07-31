@@ -511,9 +511,79 @@ void PlotView::addPlot(Plot *plot)
     connect(plot, &Plot::repaint, this, &PlotView::repaint);
 }
 
+void PlotView::addSpectrumPlot()
+{
+    if (spectrogramPlot == nullptr)
+        return;
+
+    auto plot = new SpectrumView(spectrogramPlot, this);
+    plot->enableScales(timeScaleEnabled);
+    spectrumPlots.push_back(plot);
+
+    // Drop our reference when the widget (and its dock) is destroyed via the
+    // spectrum plot's own "Remove" action.
+    connect(plot, &QObject::destroyed, this, [this](QObject *obj) {
+        auto it = std::find(spectrumPlots.begin(), spectrumPlots.end(), obj);
+        if (it != spectrumPlots.end())
+            spectrumPlots.erase(it);
+    });
+
+    // MainWindow wraps this in a detachable dock to the right of the spectrogram.
+    emit spectrumPlotAdded(plot);
+
+    // Seed the column under the pointer (alignment is resolved at paint time).
+    updateSpectrumPlots();
+}
+
+void PlotView::updateSpectrumPlots()
+{
+    if (spectrumPlots.empty())
+        return;
+
+    size_t sample = columnToSample(horizontalScrollBar()->value() + spectrumPointerX);
+    for (auto plot : spectrumPlots)
+        plot->setSample(sample);
+}
+
+bool PlotView::spectrogramScreenBand(int &topGlobal, int &heightOut,
+                                     int *visibleBottomGlobal)
+{
+    if (spectrogramPlot == nullptr || spectrogramPlot->height() <= 0)
+        return false;
+
+    // The spectrogram is the first plot, drawn from this y in the viewport
+    // (matches paintEvent). Reported in global screen
+    // coordinates so a SpectrumView can map it into its own (docked or floating)
+    // widget regardless of its title bar.
+    int spectrogramTop = -verticalScrollBar()->value();
+    topGlobal = viewport()->mapToGlobal(QPoint(0, spectrogramTop)).y();
+    heightOut = spectrogramPlot->height();
+
+    // The derived plots are drawn in a fixed band at the bottom of the viewport,
+    // painting over the lower part of the (scrollable) spectrogram. A docked
+    // SpectrumView must still map bins against the FULL spectrogram height above
+    // — shortening it would rescale the frequency axis and break the alignment
+    // this function exists to provide — so report the cut-off separately and let
+    // the caller clip to it.
+    if (visibleBottomGlobal != nullptr) {
+        int derivedH = 0;
+        for (size_t i = 1; i < plots.size(); ++i)
+            derivedH += plots[i]->height();
+        const int visibleBottom = std::max(0, viewport()->height() - derivedH);
+        *visibleBottomGlobal = viewport()->mapToGlobal(QPoint(0, visibleBottom)).y();
+    }
+    return true;
+}
+
 void PlotView::mouseMoveEvent(QMouseEvent *event)
 {
     updateAnnotationTooltip(event);
+
+    // Column under the pointer drives any spectrum (PSD) side views. Tracked
+    // separately from the fork's hover readout below so the side views keep
+    // working without upstream's crosshair/pointer-label pipeline.
+    spectrumPointerX = event->pos().x();
+    updateSpectrumPlots();
 
     int x = event->pos().x();
     int y = event->pos().y();
@@ -550,8 +620,12 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
         int contentY = y + vScroll;
         int plotH = spectrogramPlot->height();
         if (contentY >= 0 && contentY < plotH && sampleRate > 0.0) {
-            double hzPerPixel = sampleRate / plotH;
-            freqPos = ((plotH / 2.0) - contentY) * hzPerPixel;
+            // Via freqAtPlotY so real-valued inputs (which draw only the
+            // positive spectrum half) map correctly — the same rule the
+            // frequency axis uses. Subtract the centre to get the offset this
+            // signal reports.
+            freqPos = spectrogramPlot->freqAtPlotY(contentY)
+                      - spectrogramPlot->input()->getFrequency();
         }
     }
 
@@ -807,6 +881,19 @@ void PlotView::contextMenuEvent(QContextMenuEvent * event)
         addToggle("Labels",   annotationLabelsEnabled,   &PlotView::enableAnnoLabels);
         addToggle("Comments", annotationCommentsEnabled, &PlotView::enableAnnotationCommentsTooltips);
         addToggle("Colors",   annotationColorsEnabled,   &PlotView::enableAnnoColors);
+    }
+
+    // Add a standalone spectrum (PSD) window for the spectrogram. It tracks the
+    // pointer and lives in its own detachable dock to the right.
+    if (selectedPlot == spectrogramPlot) {
+        auto spectrumAction = new QAction("Add spectrum plot", &menu);
+        connect(
+            spectrumAction, &QAction::triggered,
+            this, [=]() {
+                addSpectrumPlot();
+            }
+        );
+        menu.addAction(spectrumAction);
     }
 
     // Add submenu for extracting symbols
@@ -2148,6 +2235,10 @@ void PlotView::invalidateEvent()
 {
     horizontalScrollBar()->setMinimum(0);
     horizontalScrollBar()->setMaximum(sampleToColumn(mainSampleSource->count()));
+
+    // The underlying samples changed (e.g. file reload); drop memoised FFT lines.
+    for (auto plot : spectrumPlots)
+        plot->invalidateCache();
 }
 
 void PlotView::repaint()
@@ -2441,6 +2532,16 @@ void PlotView::updateView(bool reCenter, bool expanding)
     };
     cursors.setSelection(newSelection);
 
+    // Track the column under the (possibly stationary) pointer; horizontal scroll
+    // changes it. setSample() skips the repaint when the column is unchanged.
+    updateSpectrumPlots();
+    // Force a repaint regardless so the alignment band and power scaling follow
+    // vertical scroll, resize and power-range changes even when the column (and
+    // thus setSample) didn't change. The view recomputes its alignment in paint.
+    for (auto plot : spectrumPlots)
+        plot->update();
+
+
     // Re-paint
     viewport()->update();
     // Re-analyse the visible FM trace's period after the view settles.
@@ -2463,6 +2564,9 @@ void PlotView::enableScales(bool enabled)
 
     if (spectrogramPlot != nullptr)
         spectrogramPlot->enableScales(enabled);
+
+    for (auto plot : spectrumPlots)
+        plot->enableScales(enabled);
 
     viewport()->update();
 }

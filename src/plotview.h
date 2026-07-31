@@ -32,6 +32,7 @@
 #include "plugin.h"
 #include "samplesource.h"
 #include "spectrogramplot.h"
+#include "spectrumview.h"
 #include "traceplot.h"
 
 #include <functional>
@@ -58,6 +59,15 @@ public:
     static void buildPluginMenu(QMenu *menu,
                                 const std::function<void(const PluginManifest &)> &onTrigger);
 
+    // The spectrogram's current top edge (in global screen coordinates) and its
+    // pixel height. A docked SpectrumView calls this at paint time to align its
+    // frequency axis with the spectrogram. Returns false if unavailable.
+    // visibleBottomGlobal, when non-null, receives the global y at which the
+    // derived-plot band starts covering the spectrogram: map bins against the
+    // full height, but clip drawing to this.
+    bool spectrogramScreenBand(int &topGlobal, int &heightOut,
+                               int *visibleBottomGlobal = nullptr);
+
 signals:
     void timeSelectionChanged(float time);
     void zoomIn();
@@ -78,6 +88,9 @@ signals:
     // Emitted after the analysis debounce timer fires. periodSeconds<=0
     // means "no signal / not enough data".
     void autoPeriodChanged(double periodSeconds);
+    // A new spectrum (PSD) side view was created from the context menu;
+    // MainWindow docks it.
+    void spectrumPlotAdded(SpectrumView *plot);
 
 public slots:
     void cursorsMoved();
@@ -153,6 +166,11 @@ private:
     SampleSource<std::complex<float>> *mainSampleSource = nullptr;
     SpectrogramPlot *spectrogramPlot = nullptr;
     std::vector<std::unique_ptr<Plot>> plots;
+    std::vector<SpectrumView*> spectrumPlots;  // owned by their QDockWidgets (MainWindow)
+    // Viewport x of the last pointer position, used to pick the column the
+    // spectrum side views display. Dedicated to the side views rather than
+    // shared with the hover readout, which tracks more state than this needs.
+    int spectrumPointerX = 0;
     range_t<size_t> viewRange;
     range_t<size_t> selectedSamples;
     int zoomPos;
@@ -175,6 +193,8 @@ private:
     bool annotationColorsEnabled;
 
     void addPlot(Plot *plot);
+    void addSpectrumPlot();
+    void updateSpectrumPlots();
     void emitTimeSelection();
     // Read a single-sample value from a derived plot's source (FM/AM = float,
     // IQ = complex<float>) and format for display in the status bar.

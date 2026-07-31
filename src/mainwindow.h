@@ -40,6 +40,7 @@ public slots:
     void setSampleRate(double rate);
     void setCenterFrequency(double freq);
     void setFormat(QString fmt);
+    void addSpectrumPlot(SpectrumView *plot);
     void invalidateEvent() override;
     // Persist the current annotation list to a .sigmf-meta sidecar via
     // InputSource::saveAnnotations. Triggered by the dock button.

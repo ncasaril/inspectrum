@@ -50,6 +50,7 @@ list(APPEND inspectrum_sources
     samplesource.cpp
     spectrogramcontrols.cpp
     spectrogramplot.cpp
+    spectrumview.cpp
     threshold.cpp
     traceplot.cpp
     tuner.cpp
