@@ -1,2 +1,6 @@
 # Build outputs
 build/
+
+# Python bytecode from the example plugins / their test suite
+__pycache__/
+*.pyc
