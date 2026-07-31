@@ -168,6 +168,11 @@ private:
     bool timeScaleEnabled;
     int scrollZoomStepsAccumulated = 0;
     bool annotationCommentsEnabled;
+    // Mirrors of the annotation display toggles, kept so the right-click "SigMF"
+    // submenu can open with the correct check states — the menu is rebuilt on
+    // every click, and the authoritative flags live on SpectrogramPlot.
+    bool annotationLabelsEnabled;
+    bool annotationColorsEnabled;
 
     void addPlot(Plot *plot);
     void emitTimeSelection();

@@ -19,6 +19,7 @@
  */
 
 #pragma once
+#include <QString>
 #include <algorithm>
 #include <complex>
 #include <map>
@@ -99,5 +100,13 @@ struct range_t {
 };
 
 std::string formatSIValue(float value);
+
+// Format a frequency in Hz with an SI-prefixed unit, e.g. "2.4 GHz", "-3.2 kHz".
+// Kept in double precision (unlike formatSIValue) because an SDR centre
+// frequency needs more significant digits than a float carries. When
+// signedBaseband is set, positive values are padded with a leading space so a
+// column of +/- baseband offsets stays aligned. Shared by the spectrogram's
+// frequency axis and the dock's centre-frequency readout so the two agree.
+QString formatFrequencyLabel(double hz, bool signedBaseband);
 
 template<typename T> const char* getFileNameFilter();

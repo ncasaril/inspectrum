@@ -20,6 +20,41 @@
 #include "util.h"
 #include <cmath>
 
+QString formatFrequencyLabel(double hz, bool signedBaseband)
+{
+    const double absHz = fabs(hz);
+    double value = hz;
+    QString unit = QStringLiteral("Hz");
+    int precision = 0;
+
+    if (absHz >= 1000000000.0) {
+        value = hz / 1000000000.0;
+        unit = QStringLiteral("GHz");
+        precision = 6;
+    } else if (absHz >= 1000000.0) {
+        value = hz / 1000000.0;
+        unit = QStringLiteral("MHz");
+        precision = 6;
+    } else if (absHz >= 1000.0) {
+        value = hz / 1000.0;
+        unit = QStringLiteral("kHz");
+        precision = 3;
+    }
+
+    QString number = QString::number(value, 'f', precision);
+    if (precision > 0) {
+        while (number.endsWith('0'))
+            number.chop(1);
+        if (number.endsWith('.'))
+            number.chop(1);
+    }
+
+    if (signedBaseband && hz > 0.0)
+        number.prepend(' ');
+
+    return number + QStringLiteral(" ") + unit;
+}
+
 std::string formatSIValue(float value)
 {
     std::map<int, std::string> prefixes = {

@@ -73,10 +73,9 @@ MainWindow::MainWindow()
     connect(dock->cursorsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableCursors);
     connect(dock->scalesCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableScales);
     connect(dock->annosCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotations);
-    connect(dock->annosCheckBox, &QCheckBox::stateChanged, dock, &SpectrogramControls::enableAnnotations);
-    connect(dock->annoLabelCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnoLabels);
-    connect(dock->commentsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotationCommentsTooltips);
-    connect(dock->annoColorCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnoColors);
+    // The per-box annotation toggles (Labels / Comments / Colors) moved out of
+    // the dock into the spectrogram's right-click "SigMF" submenu, so there are
+    // no checkboxes left to wire here — only the "Display" master toggle above.
     // Connect derived plot height adjustment
     connect(dock, &SpectrogramControls::derivedHeightChanged, plots, &PlotView::setDerivedPlotHeight);
     // fast-path FM demodulation toggle
@@ -222,6 +221,9 @@ void MainWindow::invalidateEvent()
     if(QString::number(input->rate()) != QString::number(currentValue)) {
         setSampleRate(input->rate());
     }
+
+    // Show the center frequency parsed from SigMF metadata (read-only display).
+    setCenterFrequency(input->getFrequency());
 }
 
 void MainWindow::setSampleRate(QString rate)
@@ -248,6 +250,15 @@ void MainWindow::setSampleRate(double rate)
     // digits, so 10 MHz renders as "1e+07" and looks to the user like the
     // rate didn't parse. Display sample rates as plain integers in Hz.
     dock->sampleRate->setText(QString::number(rate, 'f', 0));
+}
+
+void MainWindow::setCenterFrequency(double freq)
+{
+    // Format with SI prefixes (kHz/MHz/GHz...); show a plain "0 Hz" when unset.
+    // Uses the same formatter as the spectrogram's frequency axis so the dock
+    // readout and the axis labels never disagree.
+    dock->centerFrequency->setText(
+        freq == 0.0 ? QStringLiteral("0 Hz") : formatFrequencyLabel(freq, false));
 }
 
 void MainWindow::setFormat(QString fmt)

@@ -38,6 +38,7 @@ public slots:
     void openFile(QString fileName);
     void setSampleRate(QString rate);
     void setSampleRate(double rate);
+    void setCenterFrequency(double freq);
     void setFormat(QString fmt);
     void invalidateEvent() override;
     // Persist the current annotation list to a .sigmf-meta sidecar via

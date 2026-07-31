@@ -56,6 +56,11 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     sampleRate->setValidator(double_validator);
     layout->addRow(new QLabel(tr("Sample rate:")), sampleRate);
 
+    // Read-only display, formatted with SI prefixes (e.g. "2.400 GHz"). Filled
+    // from SigMF metadata by MainWindow when a file is opened.
+    centerFrequency = new QLabel();
+    layout->addRow(new QLabel(tr("Center frequency:")), centerFrequency);
+
     // Spectrogram settings
     layout->addRow(new QLabel()); // TODO: find a better way to add an empty row?
     layout->addRow(new QLabel(tr("<b>Spectrogram</b>")));
@@ -180,18 +185,15 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     symbolPeriodLabel = new QLabel();
     layout->addRow(new QLabel(tr("Symbol period:")), symbolPeriodLabel);
 
-    // SigMF selection settings
+    // SigMF annotation settings
     layout->addRow(new QLabel()); // TODO: find a better way to add an empty row?
-    layout->addRow(new QLabel(tr("<b>SigMF Control</b>")));
+    layout->addRow(new QLabel(tr("<b>SigMF Annotation Controls</b>")));
 
+    // "Display" toggles annotations on the spectrogram. The per-box options
+    // (Labels / Comments / Colors) live in the spectrogram's right-click
+    // "SigMF" menu, shown whenever Display is enabled.
     annosCheckBox = new QCheckBox(widget);
-    layout->addRow(new QLabel(tr("Display Annotations:")), annosCheckBox);
-    annoLabelCheckBox = new QCheckBox(widget);
-    layout->addRow(new QLabel(tr("Annotation Labels:")), annoLabelCheckBox);
-    commentsCheckBox = new QCheckBox(widget);
-    layout->addRow(new QLabel(tr("Annotation comments:")), commentsCheckBox);
-    annoColorCheckBox = new QCheckBox(widget);
-    layout->addRow(new QLabel(tr("Annotation Colors:")), annoColorCheckBox);
+    layout->addRow(new QLabel(tr("Display:")), annosCheckBox);
 
     // Editable global file metadata (SigMF global core:description + a
     // non-standard inspectrum:title). Saved via the same Save annotations path.
@@ -469,8 +471,10 @@ void SpectrogramControls::setDefaults()
     cursorSymbolsSpinBox->setValue(1);
 
     annosCheckBox->setCheckState(Qt::Checked);
-    annoLabelCheckBox->setCheckState(Qt::Checked);
-    annoColorCheckBox->setCheckState(Qt::Checked);
+
+    // Center frequency defaults to zero; it is auto-populated from SigMF metadata
+    // when a file with a capture frequency is opened.
+    centerFrequency->setText(tr("0 Hz"));
 
     // Try to set the sample rate from the last-used value. Sanity-check the
     // loaded value: a missing/zero setting means "no useful rate was ever
@@ -588,11 +592,6 @@ void SpectrogramControls::zoomIn()
 void SpectrogramControls::zoomOut()
 {
     zoomLevelSlider->setValue(zoomLevelSlider->value() - 1);
-}
-
-void SpectrogramControls::enableAnnotations(bool enabled) {
-    // disable annotation comments checkbox when annotations are disabled
-    commentsCheckBox->setEnabled(enabled);
 }
 
 void SpectrogramControls::setAnnotationsDirty(bool dirty)

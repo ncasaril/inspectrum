@@ -100,7 +100,6 @@ public slots:
     void timeSelectionChanged(float time);
     void zoomIn();
     void zoomOut();
-    void enableAnnotations(bool enabled);
     // Reflect the annotation dirty state — enables / disables the save
     // button and tweaks its label so the user can see when there's pending
     // work without watching the title bar.
@@ -136,6 +135,7 @@ private:
 public:
     QPushButton *fileOpenButton;
     QLineEdit *sampleRate;
+    QLabel *centerFrequency;
     QSlider *fftSizeSlider;
     QSlider *zoomLevelSlider;
     QSlider *powerMaxSlider;
@@ -170,9 +170,6 @@ public:
     QLabel *cursorValueLabel;
     QCheckBox *scalesCheckBox;
     QCheckBox *annosCheckBox;
-    QCheckBox *annoLabelCheckBox;
-    QCheckBox *commentsCheckBox;
-    QCheckBox *annoColorCheckBox;
     QSpinBox *derivedPlotHeightSpinBox;
     // fast (cheap) demodulation mode for FM traces
     QCheckBox *fastDemodCheckBox;
