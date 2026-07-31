@@ -54,6 +54,7 @@ chmod +x examples/plugins/energy-detect.py examples/plugins/fsk-analyze.py
 | `args`        | fixed args prepended before the meta-file path (optional) |
 | `sample_type` | accepted input type; only `cf32` is offered today (default `cf32`) |
 | `wants_band`  | drag a box on the spectrogram to pick the band + time before running (default `false`) |
+| `long_running` | disable the run timeout; the plugin runs until it exits or you cancel (default `false`) |
 | `params`      | parameters surfaced as a dialog before each run (optional) |
 
 Set `"wants_band": true` for a band-sensitive plugin. Running it then arms a
@@ -61,7 +62,11 @@ Set `"wants_band": true` for a band-sensitive plugin. Running it then arms a
 **vertical** extent (centre frequency + bandwidth) and the region from its **horizontal**
 extent (time), in one gesture — Esc or right-click cancels. inspectrum points the tuner at
 that band and hands the plugin exactly that slice, mixed to baseband and filtered to the
-box width, at the file's full sample rate. The box frequency edges also become the default
+box width. Because the box already bounds the bandwidth, the slice is **decimated** to fit
+it (largest power-of-2 decimation keeping the rate at least 2x the box width), so it is
+*not* at the file's full rate — read `sample_rate` from the context JSON rather than
+assuming the host rate, and note that annotation indices are in those decimated samples.
+The box frequency edges also become the default
 `core:freq_lower_edge`/`upper_edge` for annotations that don't set their own. Plugins that
 don't care about the band omit the flag and receive the current tuner output (or the raw
 input when the tuner is off) over the region chosen in the usual dialog, as before.
@@ -102,8 +107,9 @@ inspectrum extracts the chosen region, writes a temporary SigMF segment, and inv
 ### Annotation fields
 
 - `core:sample_start`, `core:sample_count` — **required**, integers, **segment-local**
-  (relative to sample 0 of the extracted segment). inspectrum maps them to absolute
-  file indices: `abs = segStart + core:sample_start`.
+  (relative to sample 0 of the extracted segment, in the units of the segment you were
+  handed — i.e. decimated samples when the segment was decimated). inspectrum maps them
+  to absolute file indices: `abs = segStart + core:sample_start * decim`.
 - `core:freq_lower_edge`, `core:freq_upper_edge` — optional, **absolute Hz**. SigMF
   requires both or neither. If omitted, inspectrum fills both from the tuner pass-band
   (or, when the tuner is off, the full input band).
@@ -127,7 +133,26 @@ plugin. Unknown extra keys are ignored.
 - Malformed stdout JSON ⇒ error shown, nothing added. Annotation entries missing
   `core:sample_start`/`core:sample_count` are skipped (the rest still apply).
 - Runs are **asynchronous** with a busy dialog + **Cancel** (kills the process) and a
-  timeout. Only one plugin runs at a time.
+  timeout (disabled by `"long_running": true`). Only one plugin runs at a time.
+
+### Progress reporting
+
+A plugin can update the busy dialog's label while it works. Write a line to **stderr**
+beginning with the **RS byte `0x1E`**; the rest of that line replaces the dialog text and
+is *not* treated as error output. Every other stderr line is collected as normal (and
+shown if the run fails). Lines must be newline-terminated to be recognised.
+
+```python
+import sys
+def progress(msg):
+    sys.stderr.write("\x1e" + msg + "\n")
+    sys.stderr.flush()
+
+progress("analysing burst 3/17")
+```
+
+This pairs well with `long_running`: a plugin with no timeout should report progress so
+the dialog does not look hung.
 
 ## Security
 
