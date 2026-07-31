@@ -119,10 +119,14 @@ public:
     // table populated during the most recent paint.
     int annotationIndexAt(int x, int y) const;
     // Convert a y in plot-local coords (0..height()) to absolute Hz, using the
-    // input source's centre frequency.
+    // input source's centre frequency. Accounts for real-valued inputs, which
+    // draw only the positive half of the spectrum (see spectrumHeight()).
     double freqAtPlotY(int y) const;
     // Inverse of freqAtPlotY: plot-local y (0..height()) for an absolute Hz.
     int plotYAtFreq(double hz) const;
+    // Logical pixel height of the full spectrum: height() for complex input,
+    // twice that for real input, matching paintFrequencyScale()'s axis.
+    int spectrumHeight() const;
     // Index of the annotation to draw resize handles on (it's being hovered or
     // edited in PlotView), or -1 for none. Purely a paint hint.
     void setActiveAnnotation(int index) { activeAnnotation_ = index; }

@@ -393,18 +393,31 @@ int SpectrogramPlot::annotationIndexAt(int x, int y) const
     return -1;
 }
 
+int SpectrogramPlot::spectrumHeight() const
+{
+    // Logical height of the full spectrum in pixels. A real-valued input shows
+    // only the positive half of the spectrum, so it draws half the logical
+    // span: 0 Hz sits at the bottom edge and Fs/2 at the top, rather than 0 Hz
+    // in the middle. paintFrequencyScale() places its ticks against this same
+    // doubled height, so the mapping below must use it or the readout and the
+    // axis labels disagree.
+    return inputSource->realSignal() ? height() * 2 : height();
+}
+
 double SpectrogramPlot::freqAtPlotY(int y) const
 {
-    if (height() <= 0 || sampleRate <= 0.0) return 0.0;
-    const double offset = ((double)height() * 0.5 - (double)y) * sampleRate / (double)height();
+    const int logicalH = spectrumHeight();
+    if (logicalH <= 0 || sampleRate <= 0.0) return 0.0;
+    const double offset = ((double)logicalH * 0.5 - (double)y) * sampleRate / (double)logicalH;
     return inputSource->getFrequency() + offset;
 }
 
 int SpectrogramPlot::plotYAtFreq(double hz) const
 {
-    if (height() <= 0 || sampleRate <= 0.0) return 0;
+    const int logicalH = spectrumHeight();
+    if (logicalH <= 0 || sampleRate <= 0.0) return 0;
     const double offset = hz - inputSource->getFrequency();
-    return (int)std::lround((double)height() * 0.5 - offset * (double)height() / sampleRate);
+    return (int)std::lround((double)logicalH * 0.5 - offset * (double)logicalH / sampleRate);
 }
 
 void SpectrogramPlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
