@@ -236,14 +236,20 @@ DC-blocks the carrier offset, peak-normalises, and returns one annotation
 covering the played region with a one-stat-per-line comment (mode, duration,
 measured peak deviation).
 
-Playback blocks until the audio finishes or you hit **Cancel** in the busy
-dialog (which kills the player child too); `max_seconds` (default 30) caps the
-span so a long box can't hit the run timeout. Needs `python3` + `numpy` +
-`scipy` and any of the players above.
+The manifest sets `"long_running": true`, so no watchdog timeout applies: with
+`loop` on (the default) the run keeps replaying until you hit **Cancel** in the
+busy dialog, which kills this process and the player child with it. `max_seconds`
+(default 30) caps the span played *per pass*, so a long box stays manageable
+rather than committing you to one very long playback. The plugin reports
+`Preparing audio` and `Playing (loop N)...` through the
+[progress protocol](#progress-reporting), so you can tell the two phases apart
+even when a passage is silent. Needs `python3` + `numpy` + `scipy` and any of the
+players above.
 
 | key             | meaning |
 |-----------------|---------|
 | `mode`          | `WFM` \| `NFM` \| `AM` (default `WFM`) |
+| `loop`          | replay until the run is cancelled (bool, default `true`) |
 | `deemphasis_us` | FM de-emphasis time constant; `auto` picks 75/50 by mode, `0` disables |
 | `audio_lpf_hz`  | audio low-pass cutoff (float, 0 = mode default) |
 | `gain_db`       | extra gain after peak-normalisation (float, default 0) |
