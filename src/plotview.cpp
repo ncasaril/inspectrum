@@ -2244,6 +2244,13 @@ void PlotView::invalidateEvent()
 void PlotView::repaint()
 {
     viewport()->update();
+    // The spectrum side views are separate widgets in their own docks, outside
+    // this viewport, so updating the viewport alone leaves them untouched. The
+    // spectrogram emits repaint() whenever its render state changes (mode,
+    // reassignment floor / window / splat, reload), and without this the side
+    // trace kept showing the previous transform until the pointer next moved.
+    for (auto plot : spectrumPlots)
+        plot->update();
 }
 
 void PlotView::setCursorSegments(int segments)

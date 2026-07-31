@@ -981,8 +981,8 @@ void SpectrogramPlot::setReassignmentFloor(int floorDb)
 {
     if (floorDb == reassignmentFloorDb) return;
     reassignmentFloorDb = floorDb;
-    ++renderEpoch_;
     if (mode != SpectrogramMode::Reassigned) return;
+    ++renderEpoch_;
     pixmapCache.clear();
     fftCache.clear();
     emit repaint();
@@ -995,9 +995,9 @@ void SpectrogramPlot::setWindowType(int wt)
                        : WindowType::Hann;
     if (w == windowType) return;
     windowType = w;
-    ++renderEpoch_;
     rebuildWindows();
     if (mode != SpectrogramMode::Reassigned) return;
+    ++renderEpoch_;
     pixmapCache.clear();
     fftCache.clear();
     emit repaint();
@@ -1010,8 +1010,8 @@ void SpectrogramPlot::setSplatMethod(int sm)
                         : SplatMethod::Bilinear;
     if (s == splatMethod) return;
     splatMethod = s;
-    ++renderEpoch_;
     if (mode != SpectrogramMode::Reassigned) return;
+    ++renderEpoch_;
     pixmapCache.clear();
     fftCache.clear();
     emit repaint();
