@@ -38,6 +38,8 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QFileInfo>
+#include "exportfiles.h"
+#include "sampleexport.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -68,7 +70,7 @@
 #include "latencylog.h"
 #include <QThreadPool>
 
-PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), derivedPlotHeight(200)
+PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), selectedSamples({0, 0}), derivedPlotHeight(200)
 {
     mainSampleSource = input;
     setDragMode(QGraphicsView::ScrollHandDrag);
@@ -78,6 +80,12 @@ PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0}), deriv
     connect(&cursors, &Cursors::cursorsMoved, this, &PlotView::cursorsMoved);
 
     spectrogramPlot = new SpectrogramPlot(std::shared_ptr<SampleSource<std::complex<float>>>(mainSampleSource));
+    connect(spectrogramPlot, &SpectrogramPlot::spectrumReady, this, [this]() {
+        if (!viewport()->underMouse() || QApplication::mouseButtons() != Qt::NoButton) return;
+        QMouseEvent event(QEvent::MouseMove, viewport()->mapFromGlobal(QCursor::pos()),
+                          Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        mouseMoveEvent(&event);
+    });
     auto tunerOutput = std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(spectrogramPlot->output());
 
     enableScales(true);
@@ -662,6 +670,7 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
 
     double freqPos = 0.0;
     QString valueText;
+    QString powerText;
 
     // Derived plots are stacked at the bottom of the viewport (each
     // `derivedPlotHeight` tall). Top of the stack is at viewportH minus
@@ -682,18 +691,27 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
             valueText = sampleValueText(plots[plotIdx].get(), sampleIdx, &hoverValue);
         }
     } else {
-        // Cursor is over the spectrogram (scrollable) — compute frequency
-        // offset from Y so the existing status-bar field stays correct.
+        // Cursor is over the spectrogram (scrollable): read absolute frequency
+        // and the displayed bin's unclipped power, not its colormap brightness.
         int vScroll = verticalScrollBar()->value();
         int contentY = y + vScroll;
         int plotH = spectrogramPlot->height();
         if (contentY >= 0 && contentY < plotH && sampleRate > 0.0) {
             // Via freqAtPlotY so real-valued inputs (which draw only the
             // positive spectrum half) map correctly — the same rule the
-            // frequency axis uses. Subtract the centre to get the offset this
-            // signal reports.
-            freqPos = spectrogramPlot->freqAtPlotY(contentY)
-                      - spectrogramPlot->input()->getFrequency();
+            // frequency axis uses), including the capture center frequency.
+            freqPos = spectrogramPlot->freqAtPlotY(contentY);
+            float power;
+            if (sampleIdx >= spectrogramPlot->input()->count())
+                powerText = tr("unavailable");
+            else if (!spectrogramPlot->requestPowerAt(sampleIdx, contentY, power))
+                powerText = tr("loading…");
+            else if (std::isfinite(power))
+                powerText = QString::number(power, 'f', 1) + tr(" dB (relative/bin)");
+            else if (std::isinf(power) && power < 0)
+                powerText = tr("−∞ dB (relative/bin)");
+            else
+                powerText = tr("unavailable");
         }
     }
 
@@ -708,7 +726,7 @@ void PlotView::mouseMoveEvent(QMouseEvent *event)
         }
     }
 
-    emit mousePositionChanged(timePos, freqPos, valueText);
+    emit mousePositionChanged(timePos, freqPos, valueText, powerText);
     QGraphicsView::mouseMoveEvent(event);
 }
 
@@ -772,6 +790,10 @@ void PlotView::mouseReleaseEvent(QMouseEvent *event)
 
 void PlotView::keyPressEvent(QKeyEvent *event)
 {
+    if (editingAnnotation >= 0 && event->key() == Qt::Key_Escape) {
+        cancelAnnotationEdit();
+        return;
+    }
     // Esc leaves an armed plugin band-select without running anything.
     if (pluginBandSelect_ && event->key() == Qt::Key_Escape) {
         cancelPluginBandSelect();
@@ -1416,8 +1438,7 @@ void PlotView::executePluginRun(const PluginManifest &manifest,
                 if (pluginProgress)
                     pluginProgress->reset();
                 auto *in = static_cast<InputSource*>(mainSampleSource);
-                for (const auto &a : annos)
-                    in->addAnnotation(a);
+                in->addAnnotations(annos);
                 const QString msg = annos.empty()
                     ? QStringLiteral("Plugin finished: no annotations returned.")
                     : QString("Plugin added %1 annotation%2.")
@@ -1770,11 +1791,53 @@ void PlotView::finishAnnotationEdit(QMouseEvent *event)
     editingAnnotation = -1;
     editGrab = AnnoGrab::None;
     if (idx >= 0 && idx < (int)inputSrc->annotationList.size()) {
-        // Commit through updateAnnotation so the dirty flag + change callbacks
-        // fire (enables Save, marks the title bar). The value is the one we
-        // edited live in place.
-        inputSrc->updateAnnotation(idx, inputSrc->annotationList[idx]);
+        const Annotation edited = inputSrc->annotationList[idx];
+        inputSrc->annotationList[idx] = editOrig;
+        inputSrc->updateAnnotation(idx, edited);
     }
+}
+
+void PlotView::cancelAnnotationEdit()
+{
+    if (editingAnnotation < 0) return;
+    auto input = static_cast<InputSource*>(mainSampleSource);
+    if (editingAnnotation < int(input->annotationList.size()))
+        input->annotationList[editingAnnotation] = editOrig;
+    editingAnnotation = -1;
+    editGrab = AnnoGrab::None;
+    viewport()->unsetCursor();
+    viewport()->update();
+}
+
+QJsonObject PlotView::analysisViewState() const
+{
+    return {{"view_start", double(viewRange.minimum)}, {"view_count", double(viewRange.maximum-viewRange.minimum)},
+            {"selection_enabled", cursorsEnabled}, {"selection_start", double(selectedSamples.minimum)},
+            {"selection_count", double(selectedSamples.maximum-selectedSamples.minimum)},
+            {"tuner_enabled", spectrogramPlot->tunerEnabled()},
+            {"tuner_offset_hz", spectrogramPlot->tunerOffsetHz()},
+            {"tuner_bandwidth_hz", spectrogramPlot->tunerBandwidthHz()},
+            {"fft_size", spectrogramPlot->getFFTSize()},
+            {"render_generation", double(spectrogramPlot->renderEpoch())}};
+}
+
+std::shared_ptr<SampleSource<std::complex<float>>> PlotView::analysisSource(bool tuned)
+{
+    return tuned ? std::dynamic_pointer_cast<SampleSource<std::complex<float>>>(spectrogramPlot->output())
+                 : spectrogramPlot->input();
+}
+
+void PlotView::focusAnalysisRange(size_t start, size_t count)
+{
+    if (!count || start >= mainSampleSource->count() || count > mainSampleSource->count() - start) return;
+    cancelAnnotationEdit();
+    cursorsEnabled = true;
+    selectedSamples = {start, start + count};
+    const size_t centre = start + count / 2;
+    horizontalScrollBar()->setValue(std::max(0, sampleToColumn(centre) - viewport()->width()/2));
+    updateView();
+    updateSelectionPlots();
+    emitTimeSelection();
 }
 
 bool PlotView::viewportEvent(QEvent *event) {
@@ -2024,7 +2087,7 @@ static int defaultPow2DecimFor(float relBw)
     if (!(relBw > 0.0f) || relBw >= 1.0f)
         return 1;
     int decim = 1;
-    while ((decim * 2) <= (int)std::floor(1.0f / relBw))
+    while (decim < 65536 && double(decim * 2) <= 1.0 / relBw)
         decim *= 2;
     return decim;
 }
@@ -2077,8 +2140,10 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
 
     QGroupBox groupBox2("Decimation");
     QSpinBox decimation(&groupBox2);
-    decimation.setMinimum(1);
-    const int rawDefaultDecim = std::max(1, (int)(1.0f / sampleSrc->relativeBandwidth()));
+    decimation.setRange(1, 65536);
+    decimation.setToolTip(tr("Anti-alias filtering is applied when decimating. Output rate = input rate / decimation."));
+    const float bandwidth = sampleSrc->relativeBandwidth();
+    const int rawDefaultDecim = bandwidth > 0 ? int(std::max(1.0, std::min(65536.0, 1.0 / bandwidth))) : 1;
     decimation.setValue(rawDefaultDecim);
 
     QVBoxLayout vbox2;
@@ -2144,27 +2209,30 @@ void PlotView::exportSamples(std::shared_ptr<AbstractSampleSource> src)
         return;
     }
 
-    std::ofstream os(fileNames[0].toStdString(), std::ios::binary);
-
-    size_t index;
-    // viewRange.length() is used as some less arbitrary step value
-    size_t step = viewRange.length();
-
-    QProgressDialog progress("Exporting samples...", "Cancel", start, end, this);
-    progress.setWindowModality(Qt::WindowModal);
-    for (index = start; index < end; index += step) {
-        progress.setValue(index);
-        if (progress.wasCanceled())
-            break;
-
-        size_t length = std::min(step, end - index);
-        auto samples = sampleSrc->getSamples(index, length);
-        if (samples != nullptr) {
-            for (auto i = 0; i < length; i += decimation.value()) {
-                os.write((const char*)&samples[i], sizeof(SOURCETYPE));
-            }
-        }
+    ExportFiles files;
+    QString error;
+    if (static_cast<InputSource*>(mainSampleSource)->isOpenFilePath(fileNames[0])) {
+        QMessageBox::warning(this, "Export samples", "Choose a destination other than the open capture or its metadata.");
+        return;
     }
+    if (!files.open({fileNames[0]}, &error)) {
+        QMessageBox::warning(this, "Export samples", error);
+        return;
+    }
+    auto &os = files.file(0);
+
+    QProgressDialog progress("Exporting samples...", "Cancel", 0, 1000, this);
+    progress.setWindowModality(Qt::WindowModal);
+    if (end < start || !writeSampleRange(os, *sampleSrc, start, end - start,
+            decimation.value(), &error, [&](size_t done, size_t total) {
+                progress.setValue(int(999.0 * done / total));
+                return !progress.wasCanceled();
+            })) {
+        if (error != "canceled") QMessageBox::warning(this, "Export samples", error);
+        return;
+    }
+    if (!files.commit(&error) || !error.isEmpty())
+        QMessageBox::warning(this, "Export samples", error);
 }
 
 // Encode a QColor as the SigMF presentation-color string "#RRGGBBAA". Inverse
@@ -2193,54 +2261,45 @@ bool PlotView::writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src
     dataPath.chop(QStringLiteral(".sigmf-meta").size());
     dataPath += QStringLiteral(".sigmf-data");
 
-    std::ofstream os(dataPath.toStdString(), std::ios::binary);
-    if (!os) {
-        QMessageBox::warning(this, "SigMF export",
-                             QStringLiteral("Could not open %1 for writing.").arg(dataPath));
+    auto input = static_cast<InputSource*>(mainSampleSource);
+    if (input->isOpenFilePath(dataPath) || input->isOpenFilePath(metaPath)) {
+        QMessageBox::warning(this, "SigMF export", "Choose a destination other than the open capture or its metadata.");
         return false;
     }
+    if ((QFileInfo::exists(dataPath) || QFileInfo::exists(metaPath)) &&
+        QMessageBox::question(this, "Replace SigMF export",
+            QString("Replace the existing export files?\n%1\n%2").arg(dataPath, metaPath),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return false;
 
-    // Read in the same chunk size as the raw exporter so progress and memory
-    // behaviour match. With decim>1 we still read a full chunk and write
-    // every Nth sample — keeps the loop simple and lets the upstream FIR see
-    // contiguous input.
-    const size_t step = std::max<size_t>(viewRange.length(), 65536);
-    QProgressDialog progress("Exporting SigMF samples...", "Cancel",
-                             (int)std::min<size_t>(start, INT_MAX),
-                             (int)std::min<size_t>(end,   INT_MAX), this);
-    progress.setWindowModality(Qt::WindowModal);
-
-    size_t writtenSamples = 0;
-    for (size_t index = start; index < end; index += step) {
-        if (index <= (size_t)INT_MAX)
-            progress.setValue((int)index);
-        if (progress.wasCanceled()) {
-            os.close();
-            QFile::remove(dataPath);
-            return false;
-        }
-        size_t length = std::min(step, end - index);
-        auto samples = src->getSamples(index, length);
-        if (!samples) continue;
-        // Pick samples whose absolute offset from `start` is a multiple of
-        // decim — keeps the every-Nth pattern aligned across chunk boundaries
-        // without explicit phase carry.
-        const size_t relStart = index - start;
-        const size_t chunkPhase = (decim - (relStart % decim)) % decim;
-        for (size_t i = chunkPhase; i < length; i += decim) {
-            os.write((const char*)&samples[i], sizeof(std::complex<float>));
-            ++writtenSamples;
-        }
+    ExportFiles files;
+    QString error;
+    if (!files.open({dataPath, metaPath}, &error)) {
+        QMessageBox::warning(this, "SigMF export", error);
+        return false;
     }
-    os.close();
+    auto &os = files.file(0);
+
+    QProgressDialog progress("Exporting SigMF samples...", "Cancel", 0, 1000, this);
+    progress.setWindowModality(Qt::WindowModal);
+    if (!writeSampleRange(os, *src, start, end - start, decim, &error,
+            [&](size_t done, size_t total) {
+                progress.setValue(int(999.0 * done / total));
+                return !progress.wasCanceled();
+            })) {
+        if (error != "canceled") QMessageBox::warning(this, "SigMF export", error);
+        return false;
+    }
+    const size_t writtenSamples = 1 + (end - start - 1) / size_t(decim);
 
     // Provenance: pull the source filename and capture frequency from the
     // InputSource at the head of the chain. mainSampleSource is always an
     // InputSource (set in the constructor), so the cast is sound.
     auto inputSrc = static_cast<InputSource*>(mainSampleSource);
-    const double oldRate = sampleRate;
-    const double tunerOffset = spectrogramPlot ? spectrogramPlot->tunerOffsetHz() : 0.0;
-    const double tunerBw    = spectrogramPlot ? spectrogramPlot->tunerBandwidthHz() : oldRate;
+    const double oldRate = src->rate();
+    const bool tuned = spectrogramPlot && spectrogramPlot->tunerEnabled() && src == spectrogramPlot->output();
+    const double tunerOffset = tuned ? spectrogramPlot->tunerOffsetHz() : 0.0;
+    const double tunerBw    = tuned ? spectrogramPlot->tunerBandwidthHz() : oldRate;
     const double oldCenter  = inputSrc ? inputSrc->getFrequency() : 0.0;
     const double newRate    = (decim > 0) ? oldRate / (double)decim : oldRate;
     const double newCenter  = oldCenter + tunerOffset;
@@ -2293,7 +2352,8 @@ bool PlotView::writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src
             // every original sample of the annotation that survived the clip.
             const size_t newStart = (clipStart - start + (size_t)decim - 1) / (size_t)decim;
             const size_t newEnd   = (clipEnd   - start) / (size_t)decim;
-            const size_t newCount = (newEnd >= newStart) ? (newEnd - newStart + 1) : 1;
+            if (newEnd < newStart || newStart >= writtenSamples) continue;
+            const size_t newCount = newEnd - newStart + 1;
 
             QJsonObject ann;
             ann.insert("core:sample_start", (qint64)newStart);
@@ -2317,15 +2377,17 @@ bool PlotView::writeSigmf(std::shared_ptr<SampleSource<std::complex<float>>> src
     root.insert("captures", captures);
     root.insert("annotations", annotations);
 
-    QFile metaFile(metaPath);
-    if (!metaFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        QMessageBox::warning(this, "SigMF export",
-                             QStringLiteral("Wrote %1 but could not open %2 for writing.")
-                                 .arg(dataPath).arg(metaPath));
+    auto &metaFile = files.file(1);
+    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (metaFile.write(json) != json.size()) {
+        QMessageBox::warning(this, "SigMF export", "Failed writing metadata: " + metaFile.errorString());
         return false;
     }
-    metaFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    metaFile.close();
+    if (!files.commit(&error)) {
+        QMessageBox::warning(this, "SigMF export", error);
+        return false;
+    }
+    if (!error.isEmpty()) QMessageBox::warning(this, "SigMF export", error);
 
     qDebug() << "SigMF export:" << writtenSamples << "samples to" << dataPath
              << "metadata to" << metaPath

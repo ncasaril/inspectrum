@@ -24,6 +24,8 @@
 #include <sstream>
 
 #include "mainwindow.h"
+#include "aibridge.h"
+#include "aidock.h"
 #include "util.h"
 
 MainWindow::MainWindow()
@@ -47,14 +49,33 @@ MainWindow::MainWindow()
     plots = new PlotView(input);
     setCentralWidget(plots);
 
-    // The app ships no menu bar of its own; create one here to host external
-    // analysis plugins (Tools -> Run plugin -> <name>). Built at startup and
-    // refreshed via "Reload plugins" (the right-click submenu rediscovers on its own).
+    QMenu *editMenu = menuBar()->addMenu(tr("Edit"));
+    auto undo = input->undoStack()->createUndoAction(this, tr("Undo"));
+    auto redo = input->undoStack()->createRedoAction(this, tr("Redo"));
+    // Restore an in-progress preview before applying a history command.
+    disconnect(undo, &QAction::triggered, input->undoStack(), &QUndoStack::undo);
+    disconnect(redo, &QAction::triggered, input->undoStack(), &QUndoStack::redo);
+    connect(undo, &QAction::triggered, this, [this]() {
+        plots->cancelAnnotationEdit(); input->undoStack()->undo();
+    });
+    connect(redo, &QAction::triggered, this, [this]() {
+        plots->cancelAnnotationEdit(); input->undoStack()->redo();
+    });
+    undo->setShortcuts(QKeySequence::Undo);
+    redo->setShortcuts(QKeySequence::Redo);
+    editMenu->addAction(undo);
+    editMenu->addAction(redo);
+
     QMenu *toolsMenu = menuBar()->addMenu(tr("Tools"));
     pluginMenu = toolsMenu->addMenu(tr("Run plugin"));
     toolsMenu->addSeparator();
     toolsMenu->addAction(tr("Reload plugins"), this, &MainWindow::rebuildPluginMenu);
     rebuildPluginMenu();
+    toolsMenu->addSeparator();
+    toolsMenu->addAction(tr("AI review…"), this, [this]() {
+        QString error;
+        if (!enableAssistant({}, &error)) QMessageBox::warning(this, tr("AI review"), error);
+    });
 
     connect(dock, &SpectrogramControls::saveAnnotationsRequested,
             this, &MainWindow::saveAnnotations);
@@ -126,10 +147,15 @@ MainWindow::MainWindow()
     // "Cursor value:" label (the dock entry is the discoverable one; the
     // status bar text is just a bonus for users used to looking down).
     connect(plots, &PlotView::mousePositionChanged,
-            this, [this](double timePos, double freqPos, QString valueText) {
+            this, [this](double timePos, double freqPos, QString valueText, QString powerText) {
         QString msg = QString("Time: %1 s   Freq: %2 Hz")
             .arg(timePos, 0, 'f', 6)
             .arg(freqPos, 0, 'f', 0);
+        if (!powerText.isEmpty()) {
+            if (input->getFrequency() != 0.0)
+                msg += QString(" (offset %1 Hz)").arg(freqPos - input->getFrequency(), 0, 'f', 0);
+            msg += tr("   Power: ") + powerText;
+        }
         if (!valueText.isEmpty()) {
             msg += QStringLiteral("   Value: ") + valueText;
         }
@@ -137,6 +163,24 @@ MainWindow::MainWindow()
         this->dock->applyCursorValue(valueText);
     });
 
+}
+
+MainWindow::~MainWindow()
+{
+    // Shut down the review panel and bridge before the view releases its input mapping.
+    delete aiDock;
+    delete aiBridge;
+}
+
+bool MainWindow::enableAssistant(const QString &endpointPath, QString *error)
+{
+    if (!aiBridge) aiBridge = new AiBridge(input, plots, this);
+    if (!aiBridge->start(endpointPath, error)) return false;
+    if (!aiDock) {
+        aiDock = new AiDock(aiBridge, this);
+        addDockWidget(Qt::RightDockWidgetArea, aiDock);
+    }
+    aiDock->show(); aiDock->raise(); return true;
 }
 
 void MainWindow::openFile(QString fileName)
@@ -270,8 +314,10 @@ void MainWindow::setFormat(QString fmt)
 void MainWindow::onAnnotationsChanged()
 {
     refreshWindowTitle();
-    if (dock)
+    if (dock) {
         dock->setAnnotationsDirty(input->annotationsDirty());
+        dock->setFileInfo(input->globalTitle(), input->globalDescription());
+    }
 }
 
 void MainWindow::refreshWindowTitle()

@@ -74,6 +74,10 @@ public:
     // marker at the column currently being shown.
     bool spectrumMarkerEnabled() const { return spectrumMarkerOn; }
     void setSpectrumMarkerEnabled(bool on);
+    QJsonObject analysisViewState() const;
+    std::shared_ptr<SampleSource<std::complex<float>>> analysisSource(bool tuned);
+    void focusAnalysisRange(size_t start, size_t count);
+    bool annotationEditActive() const { return editingAnnotation >= 0; }
 
 signals:
     void timeSelectionChanged(float time);
@@ -82,12 +86,13 @@ signals:
     /**
      * Emitted when the mouse moves over the plot area.
      * @param time     Time position in seconds corresponding to mouse X coordinate
-     * @param frequency  Frequency offset in Hz when the cursor is over the spectrogram (else 0)
+     * @param frequency  Absolute frequency in Hz over the spectrogram (else 0);
+     *                   equals offset when capture center frequency is zero.
      * @param valueText  Pre-formatted sample-value string when the cursor is over a derived
      *                   trace plot (e.g. "0.0042" for a float plot, "I=… Q=…" for IQ); empty
      *                   when over the spectrogram or no readable plot.
      */
-    void mousePositionChanged(double time, double frequency, QString valueText);
+    void mousePositionChanged(double time, double frequency, QString valueText, QString powerText);
     // Echoed after autoTuneFmLpf() picks values, so the dock widgets can
     // be updated to reflect what was applied.
     void fmAutoLpfComputed(double cutoffHz, int predemodM, int postN);
@@ -100,6 +105,7 @@ signals:
     void spectrumPlotAdded(SpectrumView *plot);
 
 public slots:
+    void cancelAnnotationEdit();
     void cursorsMoved();
     void enableCursors(bool enabled);
     void enableScales(bool enabled);

@@ -36,7 +36,8 @@ import tempfile
 import numpy as np
 
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fsk-analyze.py")
-TMP = tempfile.mkdtemp(prefix="fsk-test-")
+_temp_dir = tempfile.TemporaryDirectory(prefix="fsk-test-")
+TMP = _temp_dir.name
 FS = 250000.0
 CENTER = 433.92e6
 

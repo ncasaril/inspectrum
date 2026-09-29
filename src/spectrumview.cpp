@@ -29,6 +29,15 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QTextStream>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QHeaderView>
+#include <QLabel>
+#include <QTableWidget>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QResizeEvent>
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -43,6 +52,131 @@ SpectrumView::SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWi
 {
     setContextMenuPolicy(Qt::DefaultContextMenu);
     setMinimumWidth(160);
+    peakPanel = new QWidget(this);
+    peakPanel->setAutoFillBackground(true);
+    auto layout = new QVBoxLayout(peakPanel);
+    layout->setContentsMargins(4, 4, 4, 4);
+    peakEnabled = new QCheckBox(tr("Detect peaks"), peakPanel);
+    peakEnabled->setObjectName("spectrumDetectPeaks");
+    layout->addWidget(peakEnabled);
+    peakDetails = new QWidget(peakPanel);
+    auto details = new QVBoxLayout(peakDetails);
+    details->setContentsMargins(0, 0, 0, 0);
+    auto options = new QHBoxLayout;
+    peakThreshold = new QDoubleSpinBox(peakDetails);
+    peakThreshold->setObjectName("spectrumPeakThreshold");
+    peakThreshold->setRange(1, 60); peakThreshold->setValue(6);
+    peakThreshold->setSuffix(tr(" dB"));
+    peakThreshold->setToolTip(tr("Minimum height above the median and prominence within four bins on each side."));
+    options->addWidget(new QLabel(tr("Threshold:"), peakDetails)); options->addWidget(peakThreshold);
+    ratioBasis = new QComboBox(peakDetails); ratioBasis->setObjectName("spectrumRatioBasis");
+    ratioBasis->addItems({tr("Offset ratios"), tr("RF ratios")});
+    ratioBasis->setToolTip(tr("Frequency ratios use signed offsets from capture center, or absolute RF frequencies. Select a row as reference."));
+    options->addWidget(ratioBasis); details->addLayout(options);
+    peakRange = new QDoubleSpinBox(peakDetails);
+    peakRange->setObjectName("spectrumPeakRange");
+    peakRange->setRange(10, 160); peakRange->setValue(60); peakRange->setDecimals(0);
+    peakRange->setPrefix(tr("Within ")); peakRange->setSuffix(tr(" dB of strongest bin"));
+    details->addWidget(peakRange);
+    peakTable = new QTableWidget(0, 6, peakDetails);
+    peakTable->setObjectName("spectrumPeaks");
+    peakTable->setHorizontalHeaderLabels({tr("#"), tr("Frequency (Hz)"), tr("Offset (Hz)"),
+                                        tr("Level (dB)"), tr("Δ ref (dB)"), tr("f / ref")});
+    peakTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    peakTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    peakTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    peakTable->verticalHeader()->hide();
+    peakTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    peakTable->setToolTip(tr("Level is uncalibrated windowed FFT-bin power, not dBm or integrated channel power. Δ ref is the level difference from the reference peak."));
+    details->addWidget(peakTable, 1);
+    peakInfo = new QLabel(peakDetails); peakInfo->setObjectName("spectrumPeakInfo");
+    peakInfo->setWordWrap(true); details->addWidget(peakInfo);
+    layout->addWidget(peakDetails);
+    peakDetails->hide();
+    connect(peakEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        peakDetails->setVisible(enabled);
+        setMinimumWidth(enabled ? 400 : 160);
+        setMinimumHeight(enabled ? 420 : 80);
+        layoutPeakPanel(); refreshPeaks(); update();
+    });
+    connect(peakThreshold, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() {
+        refreshPeaks(); update();
+    });
+    connect(peakRange, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() {
+        refreshPeaks(); update();
+    });
+    connect(ratioBasis, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        refreshPeaks(); update();
+    });
+    connect(peakTable, &QTableWidget::cellClicked, this, [this](int row, int) {
+        if (row >= 0 && row < int(peaks.size())) {
+            referenceBin = peaks[row].bin;
+            refreshPeaks(); update();
+        }
+    });
+    layoutPeakPanel();
+    connect(spectrogram, &SpectrogramPlot::spectrumReady, this, [this]() { update(); });
+}
+
+int SpectrumView::plotBottom() const { return peakPanel->y(); }
+
+void SpectrumView::layoutPeakPanel()
+{
+    const int panelHeight = peakEnabled->isChecked() ? 320 : peakEnabled->sizeHint().height()+8;
+    peakPanel->setGeometry(0, std::max(0, height()-panelHeight), width(), panelHeight);
+}
+
+void SpectrumView::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    layoutPeakPanel();
+}
+
+void SpectrumView::clearPeaks(const QString &message)
+{
+    peaks.clear();
+    peakTable->setRowCount(0);
+    peakInfo->setText(message);
+}
+
+void SpectrumView::refreshPeaks()
+{
+    if (!peakEnabled->isChecked()) { clearPeaks({}); return; }
+    if (!spectrogram || !hasSample || !cacheValid || cacheSample != currentSample ||
+        cacheFFTSize != spectrogram->getFFTSize() || cacheRenderEpoch != spectrogram->renderEpoch() ||
+        cachedLines.empty() || currentSample >= spectrogram->input()->count()) {
+        clearPeaks(tr("Waiting for the current spectrum…")); return;
+    }
+    const int n = cacheFFTSize;
+    peaks = detectSpectrumPeaks(cachedLines.back(), spectrogram->isRealSignal() ? n/2 : 0,
+                                float(peakThreshold->value()), float(peakRange->value()));
+    peakTable->setRowCount(int(peaks.size()));
+    if (peaks.empty()) { peakInfo->setText(tr("No resolved peaks above threshold.")); return; }
+    auto reference = std::find_if(peaks.begin(), peaks.end(), [this](const SpectrumPeak &p) { return p.bin == referenceBin; });
+    if (reference == peaks.end()) { reference = peaks.begin(); referenceBin = reference->bin; }
+    const double step = spectrogram->getSampleRate()/n;
+    const double center = spectrogram->input()->getFrequency();
+    const bool rf = ratioBasis->currentIndex() == 1;
+    const double refFrequency = (reference->bin-n/2)*step + (rf ? center : 0);
+    const float refPower = reference->powerDb;
+    int refRow = int(reference-peaks.begin());
+    for (int row = 0; row < int(peaks.size()); ++row) {
+        const auto &p = peaks[row];
+        const double offset = (p.bin-n/2)*step;
+        const QString ratio = std::abs(refFrequency) > step*.5
+            ? QString::number((offset+(rf ? center : 0))/refFrequency, 'f', 3) : QStringLiteral("—");
+        const QStringList values{QString::number(row+1), QString::number(center+offset, 'f', 1),
+            QString::number(offset, 'f', 1), QString::number(p.powerDb, 'f', 1),
+            QString::number(p.powerDb-refPower, 'f', 1), ratio};
+        for (int col = 0; col < values.size(); ++col) {
+            auto item = new QTableWidgetItem(values[col]);
+            item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            peakTable->setItem(row, col, item);
+        }
+    }
+    peakTable->selectRow(refRow);
+    peakInfo->setText(tr("Reference #%1 · %2 Hz/bin. Select a row to change reference.\nUncalibrated levels; ratios are harmonic candidates, not proof.")
+        .arg(refRow+1).arg(step, 0, 'f', 1));
 }
 
 QSize SpectrumView::sizeHint() const
@@ -63,6 +197,7 @@ void SpectrumView::setSample(size_t sample)
         return;
     currentSample = sample;
     hasSample = true;
+    if (peakEnabled->isChecked()) clearPeaks(tr("Waiting for the current spectrum…"));
     update();
 }
 
@@ -75,6 +210,8 @@ void SpectrumView::enableScales(bool enabled)
 void SpectrumView::invalidateCache()
 {
     cacheValid = false;
+    referenceBin = -1;
+    clearPeaks(tr("Waiting for the current spectrum…"));
     update();
 }
 
@@ -96,11 +233,11 @@ void SpectrumView::paintEvent(QPaintEvent *)
     // cached) so it can never go stale. When floated into its own window, fill the
     // whole widget instead.
     int bandTop = 0;
-    int bandH = height();
+    int bandH = plotBottom();
     // Local y past which the spectrogram is covered by the derived-plot stack;
     // height() means "nothing covered". The band itself stays the full
     // spectrogram height so the bin -> y mapping is unchanged.
-    int clipBottom = height();
+    int clipBottom = plotBottom();
     auto d = dock();
     bool floating = d && d->isFloating();
     if (!floating && plotView != nullptr) {
@@ -108,7 +245,7 @@ void SpectrumView::paintEvent(QPaintEvent *)
         if (plotView->spectrogramScreenBand(topGlobal, specHeight, &visibleBottomGlobal)) {
             bandTop = mapFromGlobal(QPoint(0, topGlobal)).y();
             bandH = specHeight;
-            clipBottom = std::min(height(), mapFromGlobal(QPoint(0, visibleBottomGlobal)).y());
+            clipBottom = std::min(plotBottom(), mapFromGlobal(QPoint(0, visibleBottomGlobal)).y());
         }
     }
 
@@ -155,7 +292,7 @@ void SpectrumView::paintEvent(QPaintEvent *)
     if (scalesEnabled) {
         // Keep the dB axis labels inside the widget even when the band reaches
         // the bottom edge.
-        int dbLabelY = std::min(plotArea.bottom() + fm.ascent() + 2, height() - 2);
+        int dbLabelY = std::min(plotArea.bottom() + fm.ascent() + 2, plotBottom() - 2);
 
         // --- Power grid + bottom scale (dB) ---
         double dbStep = 10.0;
@@ -232,16 +369,24 @@ void SpectrumView::paintEvent(QPaintEvent *)
             || cacheStride != stride || cachePersistence != persistenceEnabled
             || cacheRenderEpoch != epoch
             || cachedLines.size() != traces.size()) {
-        cachedLines.clear();
-        cachedLines.reserve(traces.size());
-        for (auto &t : traces)
-            cachedLines.push_back(spectrogram->getSpectrumLine(t.first));
-        cacheValid = true;
-        cacheSample = currentSample;
-        cacheFFTSize = n;
-        cacheStride = stride;
-        cachePersistence = persistenceEnabled;
-        cacheRenderEpoch = epoch;
+        std::vector<std::vector<float>> readyLines(traces.size());
+        bool complete = true;
+        for (size_t i = 0; i < traces.size(); ++i)
+            if (!spectrogram->requestSpectrumLine(traces[i].first, readyLines[i])) complete = false;
+        if (complete) {
+            if (cacheFFTSize != n) referenceBin = -1;
+            cachedLines = std::move(readyLines);
+            cacheValid = true;
+            cacheSample = currentSample;
+            cacheFFTSize = n;
+            cacheStride = stride;
+            cachePersistence = persistenceEnabled;
+            cacheRenderEpoch = epoch;
+            refreshPeaks();
+        } else if (!cacheValid || cacheFFTSize != n || cacheRenderEpoch != epoch || cachedLines.size() != traces.size()) {
+            clearPeaks(tr("Waiting for the current spectrum…"));
+            return;
+        }
     }
 
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -249,6 +394,15 @@ void SpectrumView::paintEvent(QPaintEvent *)
     for (size_t i = 0; i < traces.size(); i++)
         drawTrace(cachedLines[i], traces[i].second);
     painter.setOpacity(1.0);
+    if (peakEnabled->isChecked() && cacheSample == currentSample && cacheRenderEpoch == epoch) {
+        painter.setPen(QPen(Qt::yellow, 1));
+        for (size_t i = 0; i < peaks.size(); ++i) {
+            const auto &peak = peaks[i];
+            QPointF point(powerToX(peak.powerDb), fracToY(float(peak.bin-binLo)/float(binHi-binLo)));
+            painter.drawEllipse(point, 3, 3);
+            painter.drawText(QPointF(std::min(point.x()+5, double(width()-24)), point.y()-3), QString::number(i+1));
+        }
+    }
 
     // Frame the plot area (only when scales are shown).
     if (scalesEnabled) {

@@ -25,6 +25,8 @@
 #include "plotview.h"
 
 class QMenu;
+class AiBridge;
+class AiDock;
 
 class MainWindow : public QMainWindow, Subscriber
 {
@@ -32,6 +34,8 @@ class MainWindow : public QMainWindow, Subscriber
 
 public:
     MainWindow();
+    ~MainWindow() override;
+    bool enableAssistant(const QString &endpointPath = {}, QString *error = nullptr);
     void changeSampleRate(double rate);
 
 public slots:
@@ -59,6 +63,8 @@ private:
     SpectrogramControls *dock;
     PlotView *plots;
     InputSource *input;
+    AiBridge *aiBridge = nullptr;
+    AiDock *aiDock = nullptr;
     // The app's only menu — built lazily; "Run plugin" submenu lives under it.
     QMenu *pluginMenu = nullptr;
     // Remembered base title (no dirty marker); refreshWindowTitle appends

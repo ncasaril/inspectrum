@@ -22,10 +22,16 @@
 #include <QWidget>
 #include <cstddef>
 #include <vector>
+#include "spectrumpeaks.h"
 
 class SpectrogramPlot;
 class PlotView;
 class QDockWidget;
+class QCheckBox;
+class QDoubleSpinBox;
+class QComboBox;
+class QTableWidget;
+class QLabel;
 
 // A standalone power-spectral-density (PSD) view: power (dB) on the horizontal
 // axis, frequency on the vertical axis so it lines up with the spectrogram it's
@@ -53,6 +59,7 @@ public slots:
 protected:
     void paintEvent(QPaintEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     SpectrogramPlot *spectrogram;
@@ -75,6 +82,20 @@ private:
     // redraws the spectrogram but leaves this trace showing the old transform,
     // since none of the other keyed fields change.
     unsigned cacheRenderEpoch = 0;
+    QWidget *peakPanel;
+    QWidget *peakDetails;
+    QCheckBox *peakEnabled;
+    QDoubleSpinBox *peakThreshold;
+    QDoubleSpinBox *peakRange;
+    QComboBox *ratioBasis;
+    QTableWidget *peakTable;
+    QLabel *peakInfo;
+    std::vector<SpectrumPeak> peaks;
+    int referenceBin = -1;
+    int plotBottom() const;
+    void layoutPeakPanel();
+    void refreshPeaks();
+    void clearPeaks(const QString &message);
 
     // The QDockWidget MainWindow wraps this view in, or nullptr if not docked.
     QDockWidget *dock() const;

@@ -29,12 +29,14 @@ set(CMAKE_CXX_STANDARD 14)
 
 list(APPEND inspectrum_sources
     abstractsamplesource.cpp
+    aibridge.cpp
+    aidock.cpp
     amplitudedemod.cpp
     annotationdialog.cpp
     cursor.cpp
     cursors.cpp
-    main.cpp
     fft.cpp
+    exportfiles.cpp
     frequencydemod.cpp
     fskdemod.cpp
     fskpolarplot.cpp
@@ -60,6 +62,7 @@ list(APPEND inspectrum_sources
 
 find_package(Qt5Widgets REQUIRED)
 find_package(Qt5Concurrent REQUIRED)
+find_package(Qt5Network REQUIRED)
 find_package(FFTW REQUIRED)
 find_package(Liquid REQUIRED)
 
@@ -83,18 +86,49 @@ include_directories(
     ${ZSTD_INCLUDES}
 )
 
-add_executable(inspectrum ${EXE_ARGS} ${inspectrum_sources})
+add_library(inspectrum_core STATIC ${inspectrum_sources})
+target_include_directories(inspectrum_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(inspectrum_core PRIVATE INSPECTRUM_AI_SOURCE_DIR="${PROJECT_SOURCE_DIR}/tools/ai")
+add_executable(inspectrum ${EXE_ARGS} main.cpp)
+target_link_libraries(inspectrum inspectrum_core)
 
-target_link_libraries(inspectrum
-    Qt5::Core Qt5::Widgets Qt5::Concurrent
+target_link_libraries(inspectrum_core PUBLIC
+    Qt5::Core Qt5::Widgets Qt5::Concurrent Qt5::Network
     ${FFTW_LIBRARIES}
     ${LIQUID_LIBRARIES}
     ${ZSTD_LIBRARIES}
 )
 
+if(BUILD_TESTING)
+    find_package(Qt5Test REQUIRED)
+    add_executable(core_tests ../tests/core_tests.cpp)
+    target_link_libraries(core_tests inspectrum_core Qt5::Test)
+    add_test(NAME core_regressions COMMAND core_tests)
+    set_tests_properties(core_regressions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120)
+    add_executable(ai_tests ../tests/ai_tests.cpp)
+    target_link_libraries(ai_tests inspectrum_core Qt5::Test)
+    add_test(NAME ai_gui_regressions COMMAND ai_tests)
+    set_tests_properties(ai_gui_regressions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import numpy"
+                    RESULT_VARIABLE numpy_missing)
+    if(numpy_missing)
+        message(FATAL_ERROR "Tests require Python 3 + numpy; install numpy or use -DBUILD_TESTING=OFF")
+    endif()
+    add_test(NAME fsk_regressions
+             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/examples/plugins/test_fsk_analyze.py)
+    set_tests_properties(fsk_regressions PROPERTIES TIMEOUT 180 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    add_test(NAME ai_mcp_integration COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test_ai_bridge.py $<TARGET_FILE:inspectrum>)
+    set_tests_properties(ai_mcp_integration PROPERTIES TIMEOUT 90 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endif()
+
 set(INSTALL_DEFAULT_BINDIR "bin" CACHE STRING "Appended to CMAKE_INSTALL_PREFIX")
 
 install(TARGETS inspectrum RUNTIME DESTINATION ${INSTALL_DEFAULT_BINDIR})
+install(FILES ../tools/ai/inspectrum_mcp.py
+              ../examples/plugins/fsk-analyze.py ../examples/plugins/energy-detect.py
+        DESTINATION share/inspectrum/ai)
 
 # Create uninstall target
 configure_file(

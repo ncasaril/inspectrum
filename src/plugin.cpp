@@ -18,6 +18,8 @@
  */
 
 #include "plugin.h"
+#include "sampleexport.h"
+#include "exportfiles.h"
 
 #include <QColor>
 #include <QDebug>
@@ -189,59 +191,13 @@ bool writeSegmentSigmf(const QString &dir,
     const QString dataPath = QDir(dir).absoluteFilePath(dataName);
     const QString metaPath = QDir(dir).absoluteFilePath(metaName);
 
-    // Write the cf32 IQ. std::complex<float> is two contiguous little-endian float32
-    // (I then Q), which is exactly the cf32_le on-disk layout inspectrum reads, so we
-    // can blit the buffer bytes directly. Pull in chunks to bound memory.
-    {
-        QFile data(dataPath);
-        if (!data.open(QIODevice::WriteOnly)) {
-            setErr(QString("cannot open %1 for writing").arg(dataPath));
-            return false;
-        }
-        const size_t chunk = 1u << 20; // 1 Msample = 8 MiB per full-rate pull
-        std::vector<std::complex<float>> strided;   // reused decimation scratch
-        for (size_t off = 0; off < count; off += chunk) {
-            if (cancel && cancel->load()) {
-                setErr("canceled");
-                data.close();
-                data.remove();
-                return false;
-            }
-            const size_t n = std::min(chunk, count - off);
-            auto buf = src->getSamples(start + off, n);
-            if (!buf) {
-                setErr("sample source returned no data (out of range?)");
-                data.close();
-                data.remove();
-                return false;
-            }
-            const char *bytes;
-            qint64 want;
-            if (decim == 1) {
-                bytes = reinterpret_cast<const char *>(buf.get());
-                want = (qint64)(n * sizeof(std::complex<float>));
-            } else {
-                // Keep every decim-th sample. The tuner FIR already band-limited the
-                // signal to the selected band, so striding is alias-safe. chunkPhase
-                // keeps the every-Nth pattern aligned across chunk boundaries (off is
-                // the running full-rate offset from `start`, sample 0 = `start`).
-                const std::complex<float> *p = buf.get();
-                const size_t chunkPhase = ((size_t)decim - (off % (size_t)decim)) % (size_t)decim;
-                strided.clear();
-                for (size_t i = chunkPhase; i < n; i += (size_t)decim)
-                    strided.push_back(p[i]);
-                if (strided.empty())
-                    continue;
-                bytes = reinterpret_cast<const char *>(strided.data());
-                want = (qint64)(strided.size() * sizeof(std::complex<float>));
-            }
-            if (data.write(bytes, want) != want) {
-                setErr(QString("short write to %1").arg(dataPath));
-                data.close();
-                data.remove();
-                return false;
-            }
-        }
+    ExportFiles files;
+    QString error;
+    if (!files.open({dataPath, metaPath}, &error) ||
+        !writeSampleRange(files.file(0), *src, start, count, decim, &error,
+            [&](size_t, size_t) { return !cancel || !cancel->load(); })) {
+        setErr(error);
+        return false;
     }
 
     // Write the matching .sigmf-meta (global + one capture carrying the absolute
@@ -267,20 +223,16 @@ bool writeSegmentSigmf(const QString &dir,
         root.insert("captures", captures);
         root.insert("annotations", QJsonArray());
 
-        QFile meta(metaPath);
-        if (!meta.open(QIODevice::WriteOnly)) {
-            setErr(QString("cannot open %1 for writing").arg(metaPath));
-            return false;
-        }
+        auto &meta = files.file(1);
         const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
         if (meta.write(json) != json.size()) {
             setErr(QString("short write to %1").arg(metaPath));
-            meta.close();
-            meta.remove();
             return false;
         }
     }
 
+    if (cancel && cancel->load()) { setErr("canceled"); return false; }
+    if (!files.commit(&error)) { setErr(error); return false; }
     if (metaPathOut) *metaPathOut = metaPath;
     if (dataPathOut) *dataPathOut = dataPath;
     return true;

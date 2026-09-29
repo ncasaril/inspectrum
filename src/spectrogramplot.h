@@ -21,6 +21,7 @@
 
 #include <QCache>
 #include <QMutex>
+#include <QFutureWatcher>
 #include <QString>
 #include <QWidget>
 #include "fft.h"
@@ -95,6 +96,12 @@ public:
     // per bin from -Fs/2 (index 0) to +Fs/2 (index fftSize-1) — including the
     // reassigned modes, so the side trace always matches what is drawn.
     std::vector<float> getSpectrumLine(size_t sample);
+    // GUI-thread cache lookup only. Misses are coalesced and computed later;
+    // spectrumReady announces that callers can retry their current request.
+    bool requestSpectrumLine(size_t sample, std::vector<float> &line);
+    // Uncalibrated rendered FFT-bin power, using the same row mapping as the image.
+    // False means unavailable or awaiting spectrumReady; never computes synchronously.
+    bool requestPowerAt(size_t sample, int plotY, float &power);
     int getColumnStride() { return getStride(); }  // samples between adjacent columns
     int getFFTSize() { return fftSize; }
     float getPowerMin() { return powerMin; }
@@ -147,6 +154,9 @@ public:
     // edited in PlotView), or -1 for none. Purely a paint hint.
     void setActiveAnnotation(int index) { activeAnnotation_ = index; }
 
+signals:
+    void spectrumReady();
+
 public slots:
     void setFFTSize(int size);
     void setPowerMax(int power);
@@ -172,6 +182,21 @@ public slots:
 private:
     const int linesPerGraduation = 50;
     static const int tileSize = 65536; // This must be a multiple of the maximum FFT size
+    struct TileInput {
+        int size, stride, floor;
+        SplatMethod splat;
+        std::vector<float> window, timeWindow, derivative;
+        std::vector<std::complex<float>> frames;
+        std::vector<bool> valid;
+    };
+    TileInput snapshotTile(size_t tile);
+    static void computeStandardSnapshot(float *dest, const TileInput &input, FftWorkSet &set);
+    static void computeReassignedSnapshot(float *dest, const TileInput &input, FftWorkSet &set);
+    void startSpectrumTile();
+    bool spectrumScheduled_ = false;
+    bool spectrumRunning_ = false;
+    size_t spectrumRequestedTile_ = 0;
+    std::shared_ptr<FftWorkSet> spectrumWorkSet_;
 
     std::shared_ptr<SampleSource<std::complex<float>>> inputSource;
     std::vector<AnnotationLocation> visibleAnnotationLocations;

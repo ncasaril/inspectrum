@@ -24,6 +24,7 @@
 #include <functional>
 #include <QFile>
 #include <QJsonObject>
+#include <QUndoStack>
 #include "samplesource.h"
 
 class SampleAdapter {
@@ -48,6 +49,8 @@ private:
     std::string _fmt;
     bool _realSignal = false;
     QString _filePath;
+    QString _sidecarPath;
+    quint64 _captureGeneration = 0;
     // SigMF datatype string ("cf32_le", "ci16_le", ...) inferred from the
     // sample adapter that openFile picked. Used when synthesising a sidecar
     // .sigmf-meta for a non-SigMF input.
@@ -75,6 +78,8 @@ private:
     QString _archiveMetaName;
     using AnnotationCallback = std::function<void()>;
     std::vector<AnnotationCallback> _annotCbs;
+    QUndoStack _undoStack;
+    void notifyAnnotationsChanged();
 
     QJsonObject readMetaData(const QString &filename);
     // Body of openFile, separated so the public openFile can reset the
@@ -125,10 +130,14 @@ public:
         return 1;
     }
     QString filePath() const { return _filePath; }
+    quint64 captureGeneration() const { return _captureGeneration; }
+    bool isOpenFilePath(const QString &path) const;
 
     // Mutate annotations through these so the dirty flag and change callback
     // fire consistently. Direct vector access still works for the read path.
     void addAnnotation(const Annotation &a);
+    void addAnnotations(const std::vector<Annotation> &annotations);
+    QUndoStack *undoStack() { return &_undoStack; }
     bool updateAnnotation(int index, const Annotation &a);
     bool removeAnnotation(int index);
     bool annotationsDirty() const { return _annotationsDirty; }

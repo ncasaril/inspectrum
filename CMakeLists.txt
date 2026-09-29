@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.16)
 project(inspectrum CXX)
-enable_testing()
+include(CTest)
 
 add_subdirectory(src)
 add_subdirectory(tools)

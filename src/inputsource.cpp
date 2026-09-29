@@ -19,6 +19,7 @@
  */
 
 #include "inputsource.h"
+#include <QSaveFile>
 
 #include <math.h>
 #include <stdio.h>
@@ -413,10 +414,36 @@ static QString decompressZstToCache(const QFileInfo &zstInfo)
 InputSource::InputSource()
 {
     frequency = 0.0;
+    _undoStack.setUndoLimit(200);
+    QObject::connect(&_undoStack, &QUndoStack::indexChanged, &_undoStack,
+                     [this]() { notifyAnnotationsChanged(); });
+    QObject::connect(&_undoStack, &QUndoStack::cleanChanged, &_undoStack,
+                     [this](bool clean) {
+        if (_annotationsDirty != !clean) notifyAnnotationsChanged();
+    });
+}
+
+namespace {
+class EditCommand : public QUndoCommand {
+public:
+    EditCommand(const QString &text, std::function<void()> redo, std::function<void()> undo)
+        : QUndoCommand(text), redo_(std::move(redo)), undo_(std::move(undo)) {}
+    void redo() override { redo_(); }
+    void undo() override { undo_(); }
+private:
+    std::function<void()> redo_, undo_;
+};
+}
+
+void InputSource::notifyAnnotationsChanged()
+{
+    _annotationsDirty = !_undoStack.isClean();
+    for (auto &cb : _annotCbs) if (cb) cb();
 }
 
 InputSource::~InputSource()
 {
+    QObject::disconnect(&_undoStack, nullptr, &_undoStack, nullptr);
     cleanup();
 }
 
@@ -442,7 +469,9 @@ QJsonObject InputSource::readMetaData(const QString &filename)
 
     QByteArray bytes = datafile.readAll();
     datafile.close();
-    return parseMetaDocument(bytes);
+    const auto root = parseMetaDocument(bytes);
+    _sidecarPath = QFileInfo(filename).absoluteFilePath();
+    return root;
 }
 
 QJsonObject InputSource::parseMetaDocument(const QByteArray &bytes)
@@ -692,6 +721,9 @@ bool InputSource::openSigmfArchive(const uchar *data, qint64 size)
 
 void InputSource::openFile(const char *filename)
 {
+    ++_captureGeneration;
+    // History belongs to one capture, including when the next open fails.
+    _undoStack.clear();
     // Reset the SigMF-archive tracking once for the whole open. openFileImpl
     // recurses for transparent zstd, and an inner frame must be able to see the
     // _containerPath / _archiveZstd the outer (zstd) frame set — so the reset
@@ -702,23 +734,40 @@ void InputSource::openFile(const char *filename)
     _archiveMetaName.clear();
     _globalDescription.clear();
     _globalTitle.clear();
+    _sidecarPath.clear();
     openFileImpl(filename);
+}
+
+bool InputSource::isOpenFilePath(const QString &path) const
+{
+    const QFileInfo candidate(path);
+    for (const auto &original : {_filePath, _sidecarPath, _containerPath,
+                                 inputFile ? inputFile->fileName() : QString()}) {
+        if (original.isEmpty()) continue;
+        const QFileInfo info(original);
+        if (candidate.absoluteFilePath() == info.absoluteFilePath() ||
+            (!candidate.canonicalFilePath().isEmpty() && candidate.canonicalFilePath() == info.canonicalFilePath()))
+            return true;
+    }
+    return false;
 }
 
 void InputSource::setGlobalDescription(const QString &text)
 {
     if (_globalDescription == text) return;
-    _globalDescription = text;
-    _annotationsDirty = true;
-    for (auto &cb : _annotCbs) if (cb) cb();
+    const QString old = _globalDescription;
+    _undoStack.push(new EditCommand("Edit file description",
+        [this, text]() { _globalDescription = text; },
+        [this, old]() { _globalDescription = old; }));
 }
 
 void InputSource::setGlobalTitle(const QString &text)
 {
     if (_globalTitle == text) return;
-    _globalTitle = text;
-    _annotationsDirty = true;
-    for (auto &cb : _annotCbs) if (cb) cb();
+    const QString old = _globalTitle;
+    _undoStack.push(new EditCommand("Edit file title",
+        [this, text]() { _globalTitle = text; },
+        [this, old]() { _globalTitle = old; }));
 }
 
 void InputSource::openFileImpl(const char *filename)
@@ -1017,26 +1066,42 @@ QJsonObject annotationToJson(const Annotation &a) {
 
 void InputSource::addAnnotation(const Annotation &a)
 {
-    annotationList.push_back(a);
-    _annotationsDirty = true;
-    for (auto &cb : _annotCbs) if (cb) cb();
+    addAnnotations({a});
+}
+
+void InputSource::addAnnotations(const std::vector<Annotation> &annotations)
+{
+    if (annotations.empty()) return;
+    const size_t oldSize = annotationList.size();
+    _undoStack.push(new EditCommand(
+        annotations.size() == 1 ? "Add annotation" : "Import annotations",
+        [this, annotations]() {
+            annotationList.insert(annotationList.end(), annotations.begin(), annotations.end());
+        },
+        [this, oldSize]() { annotationList.resize(oldSize); }));
 }
 
 bool InputSource::updateAnnotation(int index, const Annotation &a)
 {
     if (index < 0 || index >= (int)annotationList.size()) return false;
-    annotationList[index] = a;
-    _annotationsDirty = true;
-    for (auto &cb : _annotCbs) if (cb) cb();
+    const Annotation old = annotationList[index];
+    if (old.sampleRange.minimum == a.sampleRange.minimum && old.sampleRange.maximum == a.sampleRange.maximum &&
+        old.frequencyRange.minimum == a.frequencyRange.minimum && old.frequencyRange.maximum == a.frequencyRange.maximum &&
+        old.label == a.label && old.description == a.description && old.comment == a.comment && old.boxColor == a.boxColor)
+        return true;
+    _undoStack.push(new EditCommand("Edit annotation",
+        [this, index, a]() { annotationList[index] = a; },
+        [this, index, old]() { annotationList[index] = old; }));
     return true;
 }
 
 bool InputSource::removeAnnotation(int index)
 {
     if (index < 0 || index >= (int)annotationList.size()) return false;
-    annotationList.erase(annotationList.begin() + index);
-    _annotationsDirty = true;
-    for (auto &cb : _annotCbs) if (cb) cb();
+    const Annotation old = annotationList[index];
+    _undoStack.push(new EditCommand("Delete annotation",
+        [this, index]() { annotationList.erase(annotationList.begin() + index); },
+        [this, index, old]() { annotationList.insert(annotationList.begin() + index, old); }));
     return true;
 }
 
@@ -1153,6 +1218,7 @@ bool InputSource::appendMetaToArchive(const QJsonObject &root, QString *errorOut
     // The appended member is now the authority; round-trip against it next save.
     _originalSigmfRoot = root;
     _annotationsDirty = false;
+    _undoStack.setClean();
     for (auto &cb : _annotCbs) if (cb) cb();
     return true;
 }
@@ -1166,7 +1232,9 @@ bool InputSource::saveAnnotations(QString *errorOut)
 
     QFileInfo fileInfo(_filePath);
     QString metaPath;
-    if (_wasSigmfInput) {
+    if (!_sidecarPath.isEmpty()) {
+        metaPath = _sidecarPath;
+    } else if (_wasSigmfInput) {
         metaPath = fileInfo.path() + "/" + fileInfo.completeBaseName() + ".sigmf-meta";
     } else {
         // Sidecar next to the original data file. Keep the full original
@@ -1206,15 +1274,18 @@ bool InputSource::saveAnnotations(QString *errorOut)
         root.insert("annotations", annotations);
     }
 
-    // Fold the editable global metadata into global. Only write non-empty
-    // values so we don't clobber a synthesized description or litter the file
-    // with empty keys.
+    // Empty edits remove the previous values too, so clearing a field and
+    // undoing/redoing that edit survives a save and reload.
     {
         QJsonObject g = root["global"].toObject();
         if (!_globalDescription.isEmpty())
             g.insert("core:description", _globalDescription);
+        else
+            g.remove("core:description");
         if (!_globalTitle.isEmpty())
             g.insert("inspectrum:title", _globalTitle);
+        else
+            g.remove("inspectrum:title");
         root.insert("global", g);
     }
 
@@ -1225,20 +1296,25 @@ bool InputSource::saveAnnotations(QString *errorOut)
     if (_isArchive)
         return appendMetaToArchive(root, errorOut);
 
-    QFile out(metaPath);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    QSaveFile out(metaPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) {
         if (errorOut) *errorOut = "Could not open " + metaPath + " for writing: " + out.errorString();
         return false;
     }
-    out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    out.close();
+    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (out.write(json) != json.size() || !out.commit()) {
+        if (errorOut) *errorOut = "Could not save " + metaPath + ": " + out.errorString();
+        return false;
+    }
 
     // After a successful save, the on-disk root *is* the new authority — so
     // a subsequent save round-trips against the version we just wrote, not
     // the older parsed copy. Marks us as a SigMF-paired input from now on.
     _originalSigmfRoot = root;
     _wasSigmfInput = true;
+    _sidecarPath = metaPath;
     _annotationsDirty = false;
+    _undoStack.setClean();
     for (auto &cb : _annotCbs) if (cb) cb();
     return true;
 }

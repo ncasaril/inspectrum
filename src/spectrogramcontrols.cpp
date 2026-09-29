@@ -26,6 +26,8 @@
 #include <QSettings>
 #include <QLabel>
 #include <QSizePolicy>
+#include <QToolTip>
+#include <QCursor>
 #include <cmath>
 #include <string>
 #include "util.h"
@@ -446,6 +448,40 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     connect(cursorsCheckBox, &QCheckBox::stateChanged, this, &SpectrogramControls::cursorsStateChanged);
     connect(powerMinSlider, &QSlider::valueChanged, this, &SpectrogramControls::powerMinChanged);
     connect(powerMaxSlider, &QSlider::valueChanged, this, &SpectrogramControls::powerMaxChanged);
+    for (auto slider : {fftSizeSlider, zoomLevelSlider, powerMaxSlider, powerMinSlider, reassignmentFloorSlider}) {
+        connect(slider, &QSlider::valueChanged, this, [this, slider]() {
+            updateSliderToolTips();
+            if (slider->isSliderDown() || slider->hasFocus())
+                QToolTip::showText(slider->isSliderDown() ? QCursor::pos() : slider->mapToGlobal(slider->rect().center()),
+                                   slider->toolTip(), slider);
+        });
+        connect(slider, &QSlider::sliderPressed, this, [this, slider]() {
+            updateSliderToolTips();
+            QToolTip::showText(QCursor::pos(), slider->toolTip(), slider);
+        });
+    }
+    connect(sampleRate, &QLineEdit::textChanged, this, [this]() { updateSliderToolTips(); });
+    updateSliderToolTips();
+}
+
+void SpectrogramControls::updateSliderToolTips()
+{
+    const int size = 1 << fftSizeSlider->value();
+    const int step = zoomLevelSlider->value();
+    const int factor = std::min(size, 1 << std::abs(step));
+    const int stride = step >= 0 ? size/factor : size*factor;
+    const double rate = sampleRate->text().toDouble();
+    QString fftText = tr("FFT size: %1 samples").arg(size);
+    if (std::isfinite(rate) && rate > 0)
+        fftText += tr("\nBin spacing: %1 Hz\nWindow duration: %2 ms")
+            .arg(rate/size, 0, 'g', 6).arg(1000.0*size/rate, 0, 'g', 6);
+    fftSizeSlider->setToolTip(fftText);
+    zoomLevelSlider->setToolTip(tr("Zoom: %1×\n%2 samples per column")
+        .arg(step >= 0 ? double(factor) : 1.0/factor, 0, 'g', 6).arg(stride));
+    powerMaxSlider->setToolTip(tr("Power max: %1 dB\nDisplay range only; not calibrated dBm.").arg(powerMaxSlider->value()));
+    powerMinSlider->setToolTip(tr("Power min: %1 dB\nDisplay range only; not calibrated dBm.").arg(powerMinSlider->value()));
+    reassignmentFloorSlider->setToolTip(tr("Reassignment floor: %1 dB\nBins below this threshold stay at their original time/frequency.")
+        .arg(reassignmentFloorSlider->value()));
 }
 
 void SpectrogramControls::clearCursorLabels()
@@ -604,8 +640,8 @@ void SpectrogramControls::setFileInfo(const QString &title, const QString &descr
 {
     // setText doesn't emit editingFinished, so this won't loop back through
     // fileTitleChanged / fileDescriptionChanged.
-    fileTitleEdit->setText(title);
-    fileDescriptionEdit->setText(description);
+    if (fileTitleEdit->text() != title) fileTitleEdit->setText(title);
+    if (fileDescriptionEdit->text() != description) fileDescriptionEdit->setText(description);
 }
 
 void SpectrogramControls::applyAutoLpf(double cutoffHz, int predemodM, int postN)

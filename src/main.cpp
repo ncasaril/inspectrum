@@ -44,6 +44,8 @@ int main(int argc, char *argv[])
                                   QCoreApplication::translate("main", "Set file format, options: cfile/cf32/fc32, cf64/fc64, cs32/sc32/c32, cs16/sc16/c16, cs8/sc8/c8, cu8/uc8, f32, f64, s16, s8, u8, sigmf-meta/sigmf-data."),
                                   QCoreApplication::translate("main", "fmt"));
     parser.addOption(formatOption);
+    QCommandLineOption aiOption("ai-endpoint", "Enable the AI bridge and write its private connection descriptor here.", "path");
+    parser.addOption(aiOption);
 
     // Process the actual command line
     parser.process(a);
@@ -67,6 +69,12 @@ int main(int argc, char *argv[])
         mainWin.setSampleRate(rate);
     }
 
+    if (parser.isSet(aiOption)) {
+        QString error;
+        if (!mainWin.enableAssistant(parser.value(aiOption), &error)) {
+            fprintf(stderr, "ERROR: %s\n", qPrintable(error)); return 1;
+        }
+    }
     mainWin.show();
     return a.exec();
 }

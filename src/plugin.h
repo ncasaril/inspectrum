@@ -95,9 +95,9 @@ PluginManifest parseManifest(const QByteArray &json, const QString &path);
 QVector<PluginManifest> discoverPlugins();
 
 // Write a temporary SigMF segment (cf32_le .sigmf-data + .sigmf-meta) for samples
-// [start, start+count) pulled from `src`, keeping every `decim`-th sample (decim>=1;
-// the caller's tuner FIR must already band-limit the signal so striding is alias-
-// safe). The meta carries core:sample_rate = sampleRate (the ALREADY-decimated rate)
+// [start, start+count) pulled from `src`, with centred anti-alias filtering before
+// keeping every `decim`-th sample (1–65536). The meta carries
+// core:sample_rate = sampleRate (the ALREADY-decimated rate)
 // and captures[0].core:frequency = centerFreq (absolute Hz). Returns false + *errorOut
 // on failure. metaPathOut/dataPathOut may be null. Safe to call off the GUI thread.
 // If `cancel` is non-null and becomes true, the write aborts between chunks,

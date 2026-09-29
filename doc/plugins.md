@@ -11,6 +11,18 @@ spectrogram's `TunerTransform` output when the tuner is on, otherwise the raw in
 extracted over the region you choose. It is mixed to baseband — the tuner centre sits
 at 0 Hz — and carried at the file's full sample rate.
 
+Band-select plugins receive a lower sample rate as described below. All exports
+with decimation greater than one apply a centred anti-alias FIR before sampling
+at `start + k * decimation`; chunk boundaries do not change the sampling phase.
+The FIR uses surrounding capture samples where available and zero-padding at
+file edges. It has a transition band near the output Nyquist frequency, so choose
+a higher output rate when signals near that edge matter. Decimation one copies
+samples unchanged.
+
+Returned annotations are inserted as one batch. **Edit → Undo** removes the
+whole batch; **Redo** restores it. Annotation edits, drags, deletion, and file
+title/description edits use the same history (up to 200 operations per capture).
+
 ## Installing a plugin
 
 Drop a manifest JSON in:

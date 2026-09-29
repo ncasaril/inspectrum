@@ -19,9 +19,13 @@
 
 #include "fft.h"
 #include "string.h"
+#include <mutex>
+
+namespace { std::mutex plannerMutex; }
 
 FFT::FFT(int size)
 {
+    std::lock_guard<std::mutex> lock(plannerMutex);
     fftSize = size;
 
     fftwIn = (fftwf_complex*)fftwf_malloc(sizeof(fftwf_complex) * fftSize);
@@ -31,6 +35,7 @@ FFT::FFT(int size)
 
 FFT::~FFT()
 {
+    std::lock_guard<std::mutex> lock(plannerMutex);
     if (fftwPlan) fftwf_destroy_plan(fftwPlan);
     if (fftwIn) fftwf_free(fftwIn);
     if (fftwOut) fftwf_free(fftwOut);

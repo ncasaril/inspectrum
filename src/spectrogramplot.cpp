@@ -28,6 +28,7 @@
 #include <QPixmapCache>
 #include <QRect>
 #include <QThreadPool>
+#include <QTimer>
 #include <QtConcurrent>
 #include <liquid/liquid.h>
 #include <algorithm>
@@ -499,7 +500,7 @@ void SpectrogramPlot::rebuildWindows()
     // mode toggles don't have to (re)allocate.
     const int N = fftSize;
     const float tCentre = (N - 1) * 0.5f;
-    if (windowType == WindowType::Gaussian) {
+    if (mode == SpectrogramMode::Reassigned && windowType == WindowType::Gaussian) {
         // σ = 0.15·N gives a window that decays to ≈e^-22 at the endpoints
         // and time-frequency localisation close to optimal for typical N.
         // Gaussian is its own Fourier eigenfunction, so the reassignment
@@ -648,29 +649,55 @@ void SpectrogramPlot::prewarmTiles(const std::vector<size_t> &tiles)
 
 void SpectrogramPlot::computeStandardTile(float *dest, size_t tile, FftWorkSet &set)
 {
+    computeStandardSnapshot(dest, snapshotTile(tile), set);
+}
+
+SpectrogramPlot::TileInput SpectrogramPlot::snapshotTile(size_t tile)
+{
+    TileInput snapshot;
+    snapshot.size = fftSize;
+    snapshot.stride = getStride();
+    snapshot.floor = reassignmentFloorDb;
+    snapshot.splat = splatMethod;
+    snapshot.window.assign(window.get(), window.get() + fftSize);
+    snapshot.timeWindow.assign(windowTimeWeighted.get(), windowTimeWeighted.get() + fftSize);
+    snapshot.derivative.assign(windowDerivative.get(), windowDerivative.get() + fftSize);
+    snapshot.frames.resize(tileSize);
+    snapshot.valid.resize(linesPerTile(), false);
+    for (int c = 0; c < linesPerTile(); ++c) {
+        const size_t offset = size_t(c) * snapshot.stride;
+        if (tile > std::numeric_limits<size_t>::max() - offset) continue;
+        const size_t sample = tile + offset;
+        const size_t first = sample - std::min(sample, size_t(fftSize / 2));
+        auto data = inputSource->getSamples(first, fftSize);
+        if (!data) continue;
+        std::copy(data.get(), data.get() + fftSize, snapshot.frames.begin() + size_t(c) * fftSize);
+        snapshot.valid[c] = true;
+    }
+    return snapshot;
+}
+
+void SpectrogramPlot::computeStandardSnapshot(float *dest, const TileInput &input, FftWorkSet &set)
+{
     // Per-frame |STFT|² in dB. Same maths as the original getLine() loop —
     // window, FFT, fftshift to put DC in the centre row, log-power — but
     // reads/writes go through `set` so the function is reentrant and can
     // run on a worker thread alongside other tile computes.
-    const int N = fftSize;
-    const int cols = linesPerTile();
-    const int stride = getStride();
+    const int N = input.size;
+    const int cols = tileSize / N;
     const float invFFTSize = 1.0f / N;
     const float logMultiplier = 10.0f / log2f(10.0f);
     const float negInf = -std::numeric_limits<float>::infinity();
 
     for (int c = 0; c < cols; c++) {
-        size_t sample = tile + static_cast<size_t>(c) * stride;
-        const auto first_sample = std::max(static_cast<ssize_t>(sample) - N / 2,
-                                           static_cast<ssize_t>(0));
-        auto buffer = inputSource->getSamples(first_sample, N);
+        const auto *buffer = input.frames.data() + size_t(c) * N;
         float *lineDest = dest + static_cast<size_t>(c) * N;
-        if (buffer == nullptr) {
+        if (!input.valid[c]) {
             for (int i = 0; i < N; i++) lineDest[i] = negInf;
             continue;
         }
         for (int i = 0; i < N; i++) {
-            set.bufH[i] = buffer[i] * window[i];
+            set.bufH[i] = buffer[i] * input.window[i];
         }
         set.fftH->process(set.outH.data(), set.bufH.data());
         for (int i = 0; i < N; i++) {
@@ -683,6 +710,11 @@ void SpectrogramPlot::computeStandardTile(float *dest, size_t tile, FftWorkSet &
 }
 
 void SpectrogramPlot::computeReassignedTile(float *dest, size_t tile, FftWorkSet &set)
+{
+    computeReassignedSnapshot(dest, snapshotTile(tile), set);
+}
+
+void SpectrogramPlot::computeReassignedSnapshot(float *dest, const TileInput &input, FftWorkSet &set)
 {
     // Fulop-Fitz reassignment, JASA 2006:
     //   X_h  : STFT with analysis window h(n)
@@ -697,11 +729,11 @@ void SpectrogramPlot::computeReassignedTile(float *dest, size_t tile, FftWorkSet
     // FFT plans + scratch buffers come from `set` so multiple tiles can be
     // computed in parallel (FFTW execute is thread-safe; planning isn't,
     // and is done up front by ensureWorkSetPool).
-    const int N = fftSize;
-    const int cols = linesPerTile();
-    const int stride = getStride();
+    const int N = input.size;
+    const int cols = tileSize / N;
+    const int stride = input.stride;
     const float invN = 1.0f / N;
-    const float floorPower = std::pow(10.0f, reassignmentFloorDb / 10.0f);
+    const float floorPower = std::pow(10.0f, input.floor / 10.0f);
     const float halfShift = static_cast<float>(N >> 1);
 
     // accum is indexed as accum[col * N + bin] to match the tile layout
@@ -726,17 +758,14 @@ void SpectrogramPlot::computeReassignedTile(float *dest, size_t tile, FftWorkSet
     };
 
     for (int c = 0; c < cols; c++) {
-        size_t sample = tile + static_cast<size_t>(c) * stride;
-        const auto first_sample = std::max(static_cast<ssize_t>(sample) - N / 2,
-                                           static_cast<ssize_t>(0));
-        auto buffer = inputSource->getSamples(first_sample, N);
-        if (buffer == nullptr) continue;
+        const auto *buffer = input.frames.data() + size_t(c) * N;
+        if (!input.valid[c]) continue;
 
         for (int i = 0; i < N; i++) {
             auto s = buffer[i];
-            bufH[i]  = s * window[i];
-            bufTH[i] = s * windowTimeWeighted[i];
-            bufDH[i] = s * windowDerivative[i];
+            bufH[i]  = s * input.window[i];
+            bufTH[i] = s * input.timeWindow[i];
+            bufDH[i] = s * input.derivative[i];
         }
 
         set.fftH->process(outH.data(), bufH.data());
@@ -776,7 +805,7 @@ void SpectrogramPlot::computeReassignedTile(float *dest, size_t tile, FftWorkSet
             float colHat = static_cast<float>(c) + dCol;
             float binHat = static_cast<float>(k) + dBin + halfShift;
 
-            if (splatMethod == SplatMethod::Nearest) {
+            if (input.splat == SplatMethod::Nearest) {
                 // ~4× cheaper than bilinear; visually fine for tonal/chirp
                 // signals, slightly more aliased on weak ridges.
                 int colN = static_cast<int>(std::lround(colHat));
@@ -866,6 +895,79 @@ std::vector<float> SpectrogramPlot::getSpectrumLine(size_t sample)
     return line;
 }
 
+bool SpectrogramPlot::requestPowerAt(size_t sample, int plotY, float &power)
+{
+    power = std::numeric_limits<float>::quiet_NaN();
+    if (sample >= inputSource->count() || plotY < 0 || plotY >= height() || spectrumHeight() <= 0)
+        return false;
+    std::vector<float> line;
+    if (!requestSpectrumLine(sample, line)) return false;
+    const int bin = fftSize - 1 - int(double(plotY) * fftSize / spectrumHeight());
+    if (bin < 0 || bin >= int(line.size())) return false;
+    power = line[bin];
+    return true;
+}
+
+bool SpectrogramPlot::requestSpectrumLine(size_t sample, std::vector<float> &line)
+{
+    if (fftSize <= 0 || getStride() <= 0) return false;
+    const size_t span = size_t(getStride()) * linesPerTile();
+    const size_t tile = (sample / span) * span;
+    TileCacheKey key(fftSize, zoomLevel, nfftSkip, tile, mode,
+                     reassignmentFloorDb, windowType, splatMethod);
+    if (const auto *cached = fftCache.object(key)) {
+        const size_t column = (sample - tile) / size_t(getStride());
+        const float *begin = cached->data() + column * fftSize;
+        line.assign(begin, begin + fftSize);
+        return true;
+    }
+    // One worker per plot, no growing queue while the pointer moves. The last
+    // missing column requested before dispatch wins (the main trace is last).
+    spectrumRequestedTile_ = tile;
+    if (!spectrumRunning_ && !spectrumScheduled_) {
+        spectrumScheduled_ = true;
+        QTimer::singleShot(0, this, &SpectrogramPlot::startSpectrumTile);
+    }
+    return false;
+}
+
+void SpectrogramPlot::startSpectrumTile()
+{
+    spectrumScheduled_ = false;
+    if (spectrumRunning_) return;
+    const size_t tile = spectrumRequestedTile_;
+    const unsigned epoch = renderEpoch_;
+    const TileCacheKey key(fftSize, zoomLevel, nfftSkip, tile, mode,
+                           reassignmentFloorDb, windowType, splatMethod);
+    if (fftCache.contains(key)) { emit spectrumReady(); return; }
+    // Copy at most one tile's frames while the mapping is stable on the GUI
+    // thread. Workers own only snapshots, never the plot or the live source.
+    auto snapshot = std::make_shared<TileInput>(snapshotTile(tile));
+    if (!spectrumWorkSet_ || spectrumWorkSet_->size != fftSize)
+        spectrumWorkSet_ = std::shared_ptr<FftWorkSet>(acquireWorkSet().release());
+    auto work = spectrumWorkSet_;
+    const SpectrogramMode capturedMode = mode;
+    using Result = std::shared_ptr<std::array<float, tileSize>>;
+    auto watcher = new QFutureWatcher<Result>(this);
+    spectrumRunning_ = true;
+    connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, key, epoch]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        spectrumRunning_ = false;
+        if (epoch == renderEpoch_ && result)
+            fftCache.insert(key, new std::array<float, tileSize>(*result));
+        emit spectrumReady();
+    });
+    watcher->setFuture(QtConcurrent::run([snapshot, work, capturedMode]() -> Result {
+        auto result = std::make_shared<std::array<float, tileSize>>();
+        if (capturedMode == SpectrogramMode::Reassigned)
+            computeReassignedSnapshot(result->data(), *snapshot, *work);
+        else
+            computeStandardSnapshot(result->data(), *snapshot, *work);
+        return result;
+    }));
+}
+
 int SpectrogramPlot::getStride()
 {
     return fftSize * nfftSkip / zoomLevel;
@@ -910,6 +1012,7 @@ std::shared_ptr<AbstractSampleSource> SpectrogramPlot::output()
 
 void SpectrogramPlot::setFFTSize(int size)
 {
+    ++renderEpoch_;
     float sizeScale = float(size) / float(fftSize);
     fftSize = size;
     fft.reset(new FFT(fftSize));
@@ -949,11 +1052,13 @@ void SpectrogramPlot::setPowerMin(int power)
 
 void SpectrogramPlot::setZoomLevel(int zoom)
 {
+    if (zoom != zoomLevel) ++renderEpoch_;
     zoomLevel = zoom;
 }
 
 void SpectrogramPlot::setSkip(int skip)
 {
+    if (skip != nfftSkip) ++renderEpoch_;
     nfftSkip = skip;
 }
 
@@ -969,6 +1074,7 @@ void SpectrogramPlot::setSpectrogramMode(int newMode)
                             : SpectrogramMode::Standard;
     if (m == mode) return;
     mode = m;
+    rebuildWindows();
     ++renderEpoch_;
     // Cache keys include the mode, so old tiles will sit unused; clear
     // them to free the budget for the new render path.

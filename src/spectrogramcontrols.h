@@ -207,4 +207,6 @@ public:
     // (core:description).
     QLineEdit *fileTitleEdit;
     QLineEdit *fileDescriptionEdit;
+private:
+    void updateSliderToolTips();
 };
