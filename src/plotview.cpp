@@ -528,6 +528,8 @@ void PlotView::addSpectrumPlot()
     auto plot = new SpectrumView(spectrogramPlot, this);
     plot->enableScales(timeScaleEnabled);
     spectrumPlots.push_back(plot);
+    connect(plot, &SpectrumView::frequencyAreaChanged, this, &PlotView::updateSpectrumGeometry,
+            Qt::QueuedConnection);
 
     // Drop our reference when the widget (and its dock) is destroyed via the
     // spectrum plot's own "Remove" action.
@@ -535,6 +537,10 @@ void PlotView::addSpectrumPlot()
         auto it = std::find(spectrumPlots.begin(), spectrumPlots.end(), obj);
         if (it != spectrumPlots.end())
             spectrumPlots.erase(it);
+        // The shared marker has no purpose once its last spectrum is closed.
+        if (spectrumPlots.empty())
+            setSpectrumMarkerEnabled(false);
+        QTimer::singleShot(0, this, &PlotView::updateSpectrumGeometry);
     });
 
     // MainWindow wraps this in a detachable dock to the right of the spectrogram.
@@ -567,10 +573,21 @@ void PlotView::setSpectrumMarkerEnabled(bool on)
         // Drop the marker on the column the views are already showing, so
         // turning it on freezes what is on screen rather than jumping.
         spectrumMarkerSample =
-            columnToSample(horizontalScrollBar()->value() + spectrumPointerX);
+            std::min(columnToSample(horizontalScrollBar()->value() +
+                std::max(0, std::min(spectrumPointerX, viewport()->width()-1))),
+                mainSampleSource->count() ? mainSampleSource->count()-1 : size_t(0));
     } else {
         spectrumMarkerDragging = false;
     }
+    updateSpectrumPlots();
+    viewport()->update();
+}
+
+void PlotView::centerSpectrumMarker()
+{
+    setSpectrumMarkerEnabled(true);
+    spectrumMarkerSample = std::min(columnToSample(horizontalScrollBar()->value() + viewport()->width()/2),
+        mainSampleSource->count() ? mainSampleSource->count()-1 : size_t(0));
     updateSpectrumPlots();
     viewport()->update();
 }
@@ -587,7 +604,7 @@ bool PlotView::overSpectrumMarker(int x)
     if (!spectrumMarkerOn)
         return false;
     const int mx = spectrumMarkerX();
-    return std::abs(x - mx) <= 4;
+    return mx >= 0 && mx < viewport()->width() && std::abs(x - mx) <= 10;
 }
 
 void PlotView::paintSpectrumMarker(QPainter &painter, const QRect &viewRect)
@@ -601,13 +618,13 @@ void PlotView::paintSpectrumMarker(QPainter &painter, const QRect &viewRect)
     painter.save();
     // Full-height so the marked column can be read against the derived plots
     // too, not just the spectrogram.
-    QColor line(0, 200, 255);
-    painter.setPen(QPen(line, spectrumMarkerDragging ? 2 : 1, Qt::SolidLine));
+    QColor line(255, 80, 180);
+    painter.setPen(QPen(line, spectrumMarkerDragging ? 3 : 2, Qt::SolidLine));
     painter.drawLine(x, 0, x, viewRect.height());
 
     // Grab handle at the top: a filled tab wide enough to hit comfortably,
     // which also advertises that the line is draggable.
-    const int hw = 5, hh = 10;
+    const int hw = 10, hh = 18;
     QPainterPath handle;
     handle.moveTo(x - hw, 0);
     handle.lineTo(x + hw, 0);
@@ -618,6 +635,8 @@ void PlotView::paintSpectrumMarker(QPainter &painter, const QRect &viewRect)
     painter.setPen(Qt::NoPen);
     painter.setBrush(line);
     painter.drawPath(handle);
+    painter.setPen(line);
+    painter.drawText(QPoint(std::max(0, std::min(x+14, viewRect.width()-90)), 32), tr("Spectrum"));
     painter.restore();
 }
 
@@ -1918,14 +1937,21 @@ bool PlotView::viewportEvent(QEvent *event) {
         } else if (spectrumMarkerDragging && event->type() == QEvent::MouseMove) {
             const int x = static_cast<QMouseEvent*>(event)->pos().x();
             spectrumMarkerSample =
-                columnToSample(std::max(0, x + horizontalScrollBar()->value()));
+                std::min(columnToSample(std::max(0, x + horizontalScrollBar()->value())),
+                         mainSampleSource->count() ? mainSampleSource->count()-1 : size_t(0));
             updateSpectrumPlots();
             viewport()->update();
             return true;
         } else if (spectrumMarkerDragging
                    && event->type() == QEvent::MouseButtonRelease) {
+            auto *me = static_cast<QMouseEvent*>(event);
+            if (me->button() != Qt::LeftButton) return true;
+            spectrumMarkerSample = std::min(columnToSample(std::max(0, me->pos().x() + horizontalScrollBar()->value())),
+                mainSampleSource->count() ? mainSampleSource->count()-1 : size_t(0));
             spectrumMarkerDragging = false;
             viewport()->unsetCursor();
+            updateSpectrumPlots();
+            viewport()->update();
             return true;
         } else if (!spectrumMarkerDragging && event->type() == QEvent::MouseMove) {
             // Hover affordance only — the move is not consumed, so the readout
@@ -1960,6 +1986,8 @@ bool PlotView::viewportEvent(QEvent *event) {
         auto *me = static_cast<QMouseEvent*>(event);
         if (me->buttons() == Qt::NoButton)
             updateAnnotationHover(me);
+        if (me->buttons() == Qt::NoButton && overSpectrumMarker(me->pos().x()))
+            viewport()->setCursor(Qt::SplitHCursor);
     }
     // Handle wheel events for zooming (before the parent's handler to stop normal scrolling)
     if (event->type() == QEvent::Wheel) {
@@ -2674,6 +2702,48 @@ void PlotView::updateViewRange(bool reCenter)
     zoomPos = width() / 2;
 }
 
+QPair<int, int> PlotView::sharedFrequencyBounds() const
+{
+    int derivedHeight = 0;
+    for (size_t i = 1; i < plots.size(); ++i) derivedHeight += plots[i]->height();
+    int top = 0, bottom = std::max(1, viewport()->height()-derivedHeight);
+    for (auto spectrum : spectrumPlots) {
+        const QRect area = spectrum->sharedFrequencyArea();
+        if (area.isEmpty()) continue;
+        const int t = viewport()->mapFromGlobal(area.topLeft()).y();
+        const int b = t + area.height();
+        // Ignore docks in a different, non-overlapping row.
+        if (b <= top || t >= bottom) continue;
+        top = std::max(top, t);
+        bottom = std::min(bottom, b);
+    }
+    return {top, bottom};
+}
+
+void PlotView::updateSpectrumGeometry()
+{
+    const auto bounds = sharedFrequencyBounds();
+    const int specHeight = plots.empty() ? 0 : plots.front()->height();
+    verticalScrollBar()->setPageStep(std::max(1, bounds.second-bounds.first));
+    verticalScrollBar()->setRange(-bounds.first, std::max(0, specHeight-bounds.second));
+    viewport()->update();
+    for (auto spectrum : spectrumPlots) spectrum->update();
+}
+
+void PlotView::revealSpectrumFrequency(double frequency)
+{
+    if (!spectrogramPlot || !std::isfinite(frequency)) return;
+    updateSpectrumGeometry();
+    const auto bounds = sharedFrequencyBounds();
+    const int margin = std::min(12, (bounds.second-bounds.first)/4);
+    const int y = spectrogramPlot->plotYAtFreq(frequency);
+    const int visibleY = y-verticalScrollBar()->value();
+    if (visibleY < bounds.first+margin)
+        verticalScrollBar()->setValue(y-bounds.first-margin);
+    else if (visibleY >= bounds.second-margin)
+        verticalScrollBar()->setValue(y-bounds.second+margin);
+}
+
 void PlotView::updateView(bool reCenter, bool expanding)
 {
     if (!expanding) {
@@ -2683,19 +2753,8 @@ void PlotView::updateView(bool reCenter, bool expanding)
     horizontalScrollBar()->setMaximum(
         std::max(0, sampleToColumn(mainSampleSource->count()) - width())
     );
-    // Vertical scroll only for spectrogram area; derived plots are fixed at bottom
-    // Compute total height of derived plots
-    int derivedHeight = 0;
-    for (size_t i = 1; i < plots.size(); ++i) {
-        derivedHeight += plots[i]->height();
-    }
-    // Effective viewport height available to spectrogram
-    int specViewHeight = std::max(0, viewport()->height() - derivedHeight);
-    // Spectrogram plot height (first plot)
-    int specHeight = plots.empty() ? 0 : plots.front()->height();
-    verticalScrollBar()->setMaximum(
-        std::max(0, specHeight - specViewHeight)
-    );
+    // All docked frequency plots share scrolling; bottom controls stay fixed.
+    updateSpectrumGeometry();
 
     if (expanding) {
         updateViewRange(reCenter);

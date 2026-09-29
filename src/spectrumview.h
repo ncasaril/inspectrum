@@ -47,6 +47,11 @@ public:
     SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWidget *parent = nullptr);
 
     QSize sizeHint() const override;
+    // Visible chart area in desktop coordinates; empty for floating/hidden views.
+    QRect sharedFrequencyArea() const;
+
+signals:
+    void frequencyAreaChanged();
 
 public slots:
     // Select which spectrogram column (absolute sample index) to display.
@@ -57,6 +62,7 @@ public slots:
     void invalidateCache();
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;

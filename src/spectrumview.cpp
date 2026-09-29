@@ -58,6 +58,7 @@ SpectrumView::SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWi
     layout->setContentsMargins(4, 4, 4, 4);
     peakEnabled = new QCheckBox(tr("Detect peaks"), peakPanel);
     peakEnabled->setObjectName("spectrumDetectPeaks");
+    peakEnabled->setToolTip(tr("Enabling peak detection pins the spectrum to the pink marker. Drag its top handle or line to choose a different time."));
     layout->addWidget(peakEnabled);
     peakDetails = new QWidget(peakPanel);
     auto details = new QVBoxLayout(peakDetails);
@@ -94,6 +95,7 @@ SpectrumView::SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWi
     layout->addWidget(peakDetails);
     peakDetails->hide();
     connect(peakEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled && this->plotView) this->plotView->setSpectrumMarkerEnabled(true);
         peakDetails->setVisible(enabled);
         setMinimumWidth(enabled ? 400 : 160);
         setMinimumHeight(enabled ? 420 : 80);
@@ -112,6 +114,9 @@ SpectrumView::SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWi
         if (row >= 0 && row < int(peaks.size())) {
             referenceBin = peaks[row].bin;
             refreshPeaks(); update();
+            if (this->plotView && dock() && !dock()->isFloating())
+                this->plotView->revealSpectrumFrequency(this->spectrogram->input()->getFrequency() +
+                    (referenceBin-this->spectrogram->getFFTSize()/2)*this->spectrogram->getSampleRate()/this->spectrogram->getFFTSize());
         }
     });
     layoutPeakPanel();
@@ -120,10 +125,27 @@ SpectrumView::SpectrumView(SpectrogramPlot *spectrogram, PlotView *plotView, QWi
 
 int SpectrumView::plotBottom() const { return peakPanel->y(); }
 
+QRect SpectrumView::sharedFrequencyArea() const
+{
+    auto d = dock();
+    if (!isVisible() || !d || d->isFloating() || plotBottom() <= 0) return {};
+    return QRect(mapToGlobal(QPoint(0, 0)), QSize(width(), plotBottom()));
+}
+
+bool SpectrumView::event(QEvent *event)
+{
+    const bool result = QWidget::event(event);
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+        event->type() == QEvent::Move || event->type() == QEvent::ParentChange)
+        emit frequencyAreaChanged();
+    return result;
+}
+
 void SpectrumView::layoutPeakPanel()
 {
     const int panelHeight = peakEnabled->isChecked() ? 320 : peakEnabled->sizeHint().height()+8;
     peakPanel->setGeometry(0, std::max(0, height()-panelHeight), width(), panelHeight);
+    emit frequencyAreaChanged();
 }
 
 void SpectrumView::resizeEvent(QResizeEvent *event)
@@ -433,6 +455,8 @@ void SpectrumView::contextMenuEvent(QContextMenuEvent *event)
             update();
         });
         menu.addAction(marker);
+        auto center = menu.addAction(tr("Center marker in view"));
+        connect(center, &QAction::triggered, plotView, &PlotView::centerSpectrumMarker);
     }
 
     // Toggle the neighbouring-column overlay (persistence fan).

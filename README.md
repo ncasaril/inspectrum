@@ -1,6 +1,14 @@
 # inspectrum
 inspectrum is a tool for analysing captured signals, primarily from software-defined radio receivers.
 
+For bounded OOM/crash tracing, see [memory diagnostics](doc/memory-debugging.md).
+
+IQ/AM/FM traces read at most 65,536 samples per request and keep screen-sized
+min/max summaries. Autoscaling shares that pass; two background workers process
+derived traces, cancelling obsolete views between reads. Wide views preserve
+short peaks rather than skipping samples, but still require scanning the range
+on the first render (there is not yet a persistent multiresolution overview).
+
 ![inspectrum screenshot](/screenshot.jpg)
 
 ## Features
@@ -21,9 +29,17 @@ power before color scaling (including reassignment when enabled). It is not
 calibrated dBm or total channel power; FFT/window settings affect the reading.
 
 Spectrum side views have a **Detect peaks** checkbox and a table below the trace.
+Enabling peak detection pins the spectrum to a pink vertical marker instead of
+following the mouse. Drag the wide top handle or the line to move it. The marker
+is shared by spectrum views and stays at the same sample when panning/zooming.
+Use the spectrum's right-click **Center marker in view** to retrieve it after
+panning away, or explicitly turn off **Lock to marker line** to resume following.
 Numbered markers match table rows: absolute frequency, center-frequency offset,
 uncalibrated FFT-bin level, level relative to the reference peak, and frequency
 ratio. The strongest peak is the initial reference; click another row to use it.
+Docked spectra share vertical scrolling with the spectrogram, including when
+the peak table leaves less room for the trace. Selecting a peak also scrolls its
+frequency into view; the table stays fixed while both frequency plots move.
 Choose **Offset ratios** for baseband harmonics or **RF ratios** for absolute
 frequencies. Ratios are undefined for a zero-frequency reference, and integer
 ratios alone do not establish a harmonic relationship.

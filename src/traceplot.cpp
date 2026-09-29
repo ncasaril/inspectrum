@@ -18,58 +18,32 @@
  */
 
 #include <QDebug>
-#include <QPixmapCache>
-#include <QTextStream>
 #include <QtConcurrent>
 #include <QThreadPool>
 #include <QPainterPath>
 #include <cmath>
-#include <limits>
 #include <algorithm>
 #include "samplesource.h"
 #include "traceplot.h"
-#include "latencylog.h"
 
-#define INSPECTRUM_TRACE_DEBUG 0
+TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source)
+{
+    watcher = new QFutureWatcher<TraceSummary>(this);
+    connect(watcher, &QFutureWatcher<TraceSummary>::finished, this, &TracePlot::summaryReady);
+}
 
-TracePlot::TracePlot(std::shared_ptr<AbstractSampleSource> source) : Plot(source) {
-    connect(this, &TracePlot::imageReady, this, &TracePlot::handleImage);
-    // debounce timer: batch up rapid tile requests
-    debounceTimer = new QTimer(this);
-    debounceTimer->setSingleShot(true);
-    debounceTimer->setInterval(50); // ms delay
-    connect(debounceTimer, &QTimer::timeout,
-            this, &TracePlot::schedulePendingTiles);
-    // vertical zoom scale
-    yScale = 1.0;
-    // initialize min/max background watcher
-    minMaxWatcher = new QFutureWatcher<QPair<double,double>>(this);
-    connect(minMaxWatcher, &QFutureWatcher<QPair<double,double>>::finished,
-            this, &TracePlot::onMinMaxReady);
-    firstMinMax = true;
+TracePlot::~TracePlot()
+{
+    if (cancel) cancel->store(true);
+    // Workers own their source and token, never the plot; no GUI-thread wait.
 }
 
 void TracePlot::invalidateEvent()
 {
-    // Force a fresh min/max scan next paint and unreach cached tiles. We keep
-    // the previous globalMin/Max around until the new scan completes so the
-    // first post-invalidate frame is at least drawable rather than blank.
-    // Bumping dataEpoch unreaches both the complex-tile cache (key includes
-    // dataEpoch) and the async float image cache (FloatKey carries it), so
-    // we naturally fall through to a re-render on next paint.
-    //
-    // We deliberately bump *only* on real upstream changes here, not on
-    // min/max wobbles — see applyMinMax for the rationale. Successive
-    // tuner positions can produce min/max scans that differ by 1-3% from
-    // pure FIR/cache boundary noise, and re-rendering for those would
-    // cascade for seconds after every release.
-    firstMinMax = true;
     ++dataEpoch;
-    // Drop the stale float-trace image so paintMid blanks the plot until
-    // the in-flight worker delivers a fresh one. Showing stale-but-pretty
-    // data during a drag made the user think the worker had stalled — a
-    // brief blank frame is a clearer "we are recomputing" signal.
-    floatHasImage_ = false;
+    if (cancel) cancel->store(true);
+    wanted = false;
+    hasSummary = false;
     emit repaint();
 }
 
@@ -109,7 +83,7 @@ void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampl
 {
     // Draw a left-margin y-axis (min / mid / max) and a dashed zero line when
     // zero is within the currently-displayed range. Values come from the shared
-    // globalMin/globalMax computed in scheduleMinMaxIfNeeded(); the float path
+    // globalMin/globalMax computed with the trace summary; the float path
     // additionally compresses/expands by yScale, so reflect that here.
     double minv = globalMin;
     double maxv = globalMax;
@@ -255,561 +229,120 @@ void TracePlot::paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampl
     painter.restore();
 }
 
-static QPair<double,double> scanFloatRange(SampleSource<float> *src, range_t<size_t> range)
+
+namespace {
+QThreadPool *tracePool()
 {
-    size_t count = range.maximum - range.minimum;
-    QPair<double,double> result{
-        std::numeric_limits<double>::infinity(),
-        -std::numeric_limits<double>::infinity()};
-    auto data = src->getSamples(range.minimum, count);
-    if (data) {
-        for (size_t i = 0; i < count; ++i) {
-            double v = data[i];
-            // Skip NaN/Inf — freqdem's fresh-state output near t=0 can emit
-            // non-finite samples which would poison min/max comparisons
-            // (NaN < x is always false).
-            if (!std::isfinite(v)) continue;
-            if (v < result.first)  result.first  = v;
-            if (v > result.second) result.second = v;
-        }
-    }
-    return result;
+    // Shared bounded concurrency, independent of the machine's CPU count.
+    static QThreadPool pool;
+    static const bool configured = [] { pool.setMaxThreadCount(2); return true; }();
+    (void)configured;
+    return &pool;
 }
-
-static QPair<double,double> scanComplexRange(SampleSource<std::complex<float>> *src, range_t<size_t> range)
-{
-    size_t count = range.maximum - range.minimum;
-    QPair<double,double> result{
-        std::numeric_limits<double>::infinity(),
-        -std::numeric_limits<double>::infinity()};
-    auto data = src->getSamples(range.minimum, count);
-    if (data) {
-        for (size_t i = 0; i < count; ++i) {
-            double re = data[i].real();
-            double im = data[i].imag();
-            if (std::isfinite(re)) {
-                if (re < result.first)  result.first  = re;
-                if (re > result.second) result.second = re;
-            }
-            if (std::isfinite(im)) {
-                if (im < result.first)  result.first  = im;
-                if (im > result.second) result.second = im;
-            }
-        }
-    }
-    return result;
-}
-
-void TracePlot::applyMinMax(QPair<double,double> result)
-{
-#if INSPECTRUM_TRACE_DEBUG
-    qDebug().nospace() << "[TP " << this << "] applyMinMax got ("
-                       << result.first << ", " << result.second << ")"
-                       << " current global=(" << globalMin << ", " << globalMax << ")";
-#endif
-    if (!std::isfinite(result.first) || !std::isfinite(result.second)) {
-#if INSPECTRUM_TRACE_DEBUG
-        qDebug() << "[TP" << this << "] applyMinMax REJECTED — non-finite (no valid samples in scan range)";
-#endif
-        return;
-    }
-    const double newMin = result.first;
-    double newMax = result.second;
-    if (newMax <= newMin) newMax = newMin + 1.0;
-
-    // Tolerance-gate the bump: each render kicks off a scan, and the scan's
-    // result wobbles by tiny float amounts every cycle (different cache
-    // fill boundaries, FIR transient differences). Without a tolerance the
-    // epoch keeps bumping → keeps invalidating the float-trace key → keeps
-    // re-rendering. Net effect: the trace never "settles" after a tuner
-    // drag and the user sees several seconds of churn.
-    //
-    // 1% of the current range is well below visual significance (a 200 px
-    // tall plot would shift by <2 px), so reject sub-tolerance updates and
-    // leave globalMin/Max unchanged so the axis labels match the cached
-    // image's mapping exactly.
-    // Gauge the tolerance off the larger of the old and new ranges, not off a
-    // range floored at 1.0: for a capture peaking at 0.02 a floored range made
-    // tol 0.01, half the signal's entire span, so a 40%-visible rescale was
-    // rejected outright and the plot stayed frozen at the wrong scale.
-    const double refRange = std::max({globalMax - globalMin, newMax - newMin, 1e-12});
-    const double tol = std::max(1e-12, refRange * 0.01);
-    const bool significant = std::abs(newMin - globalMin) > tol ||
-                             std::abs(newMax - globalMax) > tol;
-    if (!significant) return;
-
-    // Invalidate the cached renders on exactly the same condition that moves
-    // globalMin/Max. A second, coarser threshold here would open a band where
-    // the axis labels paintFront draws live have moved but the cached pixels
-    // still encode the old mapping — permanently, since nothing else mints a
-    // new key. The gate above is already the churn filter.
-    ++scaleEpoch;
-
-    const double prevMin = globalMin, prevMax = globalMax;
-    globalMin = newMin;
-    globalMax = newMax;
-    ++minMaxEpoch;
-    LatencyLog::markf("traceplot[%p] minMax bump epoch=%d (%.4g..%.4g -> %.4g..%.4g)",
-                      (void*)this, minMaxEpoch, prevMin, prevMax, globalMin, globalMax);
-}
-
-void TracePlot::scheduleMinMaxIfNeeded(range_t<size_t> sampleRange)
-{
-    bool rangeChanged = firstMinMax ||
-        sampleRange.minimum != minMaxRange.minimum ||
-        (sampleRange.maximum - sampleRange.minimum) !=
-            (minMaxRange.maximum - minMaxRange.minimum);
-    if (!rangeChanged || minMaxWatcher->isRunning())
-        return;
-    minMaxRange = sampleRange;
-    firstMinMax = false;
-
-    // Always async, including the first scan — a sync scan here means the
-    // GUI thread blocks on getSamples (which can fan out to the FFT-LPF in
-    // FrequencyDemod, hundreds of ms for large views). We accept that the
-    // very first frame after a parameter change uses the previous globalMin/
-    // Max (or the default 0..1 if this plot has never rendered) — the float
-    // image renderer will re-run automatically once the scan finishes via the
-    // minMaxEpoch bump in applyMinMax.
-    auto rangeCopy = sampleRange;
-    LatencyLog::markf("traceplot[%p] minMax scan dispatch range=[%zu..%zu)",
-                      (void*)this, rangeCopy.minimum, rangeCopy.maximum);
-    if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
-        auto srcPtr = srcF;
-        minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
-            return scanFloatRange(srcPtr, rangeCopy);
-        }));
-    } else if (auto srcC = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
-        auto srcPtr = srcC;
-        minMaxWatcher->setFuture(QtConcurrent::run([srcPtr, rangeCopy]() {
-            return scanComplexRange(srcPtr, rangeCopy);
-        }));
-    }
 }
 
 void TracePlot::paintMid(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
-    // Shared: kick off background global min/max whenever the range changes.
-    // Used for consistent vertical scaling across both paths and across tiles.
-    scheduleMinMaxIfNeeded(sampleRange);
-
-    // Single-channel (float) derived plots: render to an offscreen QImage on
-    // a worker thread and blit the most recent completed frame here. The GUI
-    // thread never builds the path or pulls samples; pan/zoom/parameter
-    // changes just bump the desired key, and as soon as the in-flight render
-    // finishes we request the latest one. The user sees one slightly stale
-    // frame while the new one renders, and a fresh frame at "as fast as the
-    // worker can complete" rate during a sustained drag.
-    if (auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
-        const int w = rect.width();
-        const int h = height();
-        if (w < 1 || h < 1) return;
-        const size_t start = sampleRange.minimum;
-        const size_t len = sampleRange.maximum - sampleRange.minimum;
-
-        FloatKey k{start, len, w, h, yScale, dataEpoch, scaleEpoch};
-        floatPendingKey_ = k;
-        floatPendingValid_ = true;
-
-        // Only blit when the cached image actually matches the current key.
-        // Showing a stale image during a tuner/zoom drag was misleading —
-        // the user couldn't tell whether the worker was running or stuck,
-        // and an out-of-date trace masquerades as live data. A blank plot
-        // while computation is in flight + an instant fresh frame on
-        // completion is a more honest signal.
-        if (floatHasImage_ && floatImageKey_ == k) {
-            painter.drawImage(rect, floatImage_);
-        }
-
-        const bool needRender = len > 0 &&
-            (!floatHasImage_ || floatImageKey_ != k);
-        if (needRender && !floatRunning_) {
-            double minv = globalMin;
-            double maxv = globalMax;
-            if (maxv <= minv) maxv = minv + 1.0;
-            double mid = 0.5 * (minv + maxv);
-            double invRange = yScale / (maxv - minv);
-            LatencyLog::markf("traceplot[%p] paintMid float: dispatch render len=%zu w=%d",
-                              (void*)this, len, w);
-            startFloatRender(k, mid, invRange);
-        } else if (needRender) {
-            LatencyLog::markf("traceplot[%p] paintMid float: render busy, key shifted",
-                              (void*)this);
-        }
-        return;
+    Key next{sampleRange.minimum, sampleRange.maximum >= sampleRange.minimum
+        ? sampleRange.maximum-sampleRange.minimum : 0, std::min(rect.width(), 32768), dataEpoch};
+    if (!wanted || next != desired) {
+        desired = next;
+        wanted = true;
+        if (cancel) cancel->store(true);
     }
-    // Fallback: raw complex or multi-channel trace uses threaded pixmap pipeline.
-    // Tiles share the same globalMin/globalMax, so amplitude is consistent across edges.
-    currentFrameKeys.clear();
-    size_t totalLen = sampleRange.maximum - sampleRange.minimum;
-    if (totalLen == 0) return;
-    int samplesPerColumn = std::max(1UL, totalLen / rect.width());
-    int threads = QThreadPool::globalInstance()->maxThreadCount();
-    if (threads < 1) threads = 1;
-    int tilePx = rect.width() / threads;
-    if (tilePx < 1) tilePx = 1;
-    int samplesPerTile = tilePx * samplesPerColumn;
-    size_t tileID = sampleRange.minimum / samplesPerTile;
-    size_t tileOffset = sampleRange.minimum % samplesPerTile;
-    int xOffset = tileOffset / samplesPerColumn;
-    // Paint first (possibly partial) tile
-    painter.drawPixmap(
-        QRect(rect.x(), rect.y(), tilePx - xOffset, height()),
-        getTile(tileID++, samplesPerTile, tilePx),
-        QRect(xOffset, 0, tilePx - xOffset, height())
-    );
-    // Paint remaining tiles
-    for (int x = tilePx - xOffset; x < rect.right(); x += tilePx) {
-        painter.drawPixmap(
-            QRect(x, rect.y(), tilePx, height()),
-            getTile(tileID++, samplesPerTile, tilePx)
-        );
-    }
+    if (hasSummary && completed == desired) drawSummary(painter, rect);
+    else if (!busy) startSummary();
 }
 
-QPixmap TracePlot::getTile(size_t tileID, size_t sampleCount, int tileWidthPx)
+void TracePlot::startSummary()
 {
-    QPixmap pixmap(tileWidthPx, height());
-    // build tile key and mark as desired for this frame
-    QString key;
-    QTextStream ts(&key);
-    ts << "traceplot_" << this << "_" << tileID << "_" << sampleCount
-       << "_" << dataEpoch << "_" << scaleEpoch << "_" << height()
-       << "_" << tileWidthPx;
-    currentFrameKeys.insert(key);
-    // if we already have a cached pixmap, return it immediately
-    if (QPixmapCache::find(key, &pixmap))
-        return pixmap;
-
-    // schedule a new tile-draw if not already running or pending
-    if (!tasks.contains(key) && !pendingInfo.contains(key)) {
-        pendingInfo.insert(key, {tileID, sampleCount, tileWidthPx, height()});
-        debounceTimer->start();
-    }
-    pixmap.fill(Qt::transparent);
-    return pixmap;
-}
-
-void TracePlot::drawTile(QString key, const QRect &rect, range_t<size_t> sampleRange,
-                         double mid, double invRange)
-{
-    // NOTE: runs on a QtConcurrent worker thread. Do not touch currentFrameKeys
-    // or tasks from here — they live on the GUI thread and QSet isn't
-    // thread-safe. Any early-exit / bookkeeping based on those sets happens in
-    // handleImage() on the GUI thread (at the cost of a potentially wasted
-    // render for tiles that have scrolled out of view).
-    QImage image(rect.size(), QImage::Format_ARGB32);
-    image.fill(Qt::transparent);
-
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-
-    auto firstSample = sampleRange.minimum;
-    auto length = sampleRange.length();
-
-    // mid/invRange are snapshotted on the GUI thread at dispatch (see
-    // schedulePendingTiles). Reading globalMin/Max here instead would be a
-    // data race against applyMinMax, and would let a scan landing mid-flight
-    // give one frame's tiles two different scales — cached under keys minted
-    // before the bump, so the amplitude step at the tile seam never clears.
-
-    // Is it a 2-channel (complex) trace?
-    if (auto src = dynamic_cast<SampleSource<std::complex<float>>*>(sampleSource.get())) {
-        auto samples = src->getSamples(firstSample, length);
-        if (samples) {
-            painter.setPen(Qt::red);
-            plotTrace(painter, rect, reinterpret_cast<float*>(samples.get()), length, 2, mid, invRange);
-            painter.setPen(Qt::blue);
-            plotTrace(painter, rect, reinterpret_cast<float*>(samples.get())+1, length, 2, mid, invRange);
+    if (!wanted || busy || desired.width <= 0 || !desired.length) return;
+    busy = true;
+    running = desired;
+    cancel = std::make_shared<std::atomic<bool>>(false);
+    const auto token = cancel;
+    const auto key = running;
+    const auto source = sampleSource; // Keeps the processing chain alive on close.
+    watcher->setFuture(QtConcurrent::run(tracePool(), [source, token, key] {
+        try {
+            if (auto f = dynamic_cast<SampleSource<float>*>(source.get()))
+                return summarizeTrace(*f, key.start, key.length, key.width, *token);
+            if (auto iq = dynamic_cast<SampleSource<std::complex<float>>*>(source.get()))
+                return summarizeTrace(*iq, key.start, key.length, key.width, *token);
+        } catch (const std::exception &error) {
+            qWarning("Trace summary failed: %s", error.what());
         }
-
-    // Otherwise is it single channel?
-    } else if (auto src = dynamic_cast<SampleSource<float>*>(sampleSource.get())) {
-        auto samples = src->getSamples(firstSample, length);
-        if (samples) {
-            painter.setPen(Qt::green);
-            plotTrace(painter, rect, samples.get(), length, 1, mid, invRange);
-        }
-    } else {
-        throw std::runtime_error("TracePlot::drawTile: Unsupported source type");
-    }
-
-    // Always emit — handleImage needs to clear the in-flight bookkeeping even
-    // when getSamples returned null (otherwise the tile stays "in flight"
-    // indefinitely and never re-schedules).
-    emit imageReady(key, image);
-}
-
-void TracePlot::handleImage(QString key, QImage image)
-{
-    // Worker finished; clear the in-flight bookkeeping on the GUI thread.
-    tasks.remove(key);
-    // If this tile is no longer desired (viewport moved past it while the
-    // worker was running), drop it without caching.
-    if (!currentFrameKeys.contains(key))
-        return;
-    auto pixmap = QPixmap::fromImage(image);
-    QPixmapCache::insert(key, pixmap);
-    emit repaint();
-}
-
-void TracePlot::plotTrace(QPainter &painter, const QRect &rect, float *samples,
-                          size_t count, int step, double mid, double invRange)
-{
-    // Scaling (mid, invRange) is supplied by the caller so all tiles share one range.
-    QPainterPath path;
-    const int w = rect.width();
-    const int h = rect.height();
-    if (w < 1 || h < 1 || count == 0) return;
-    // Clip x to the last drawable column, not w-2: now that the dense branch
-    // emits every sample rather than one per column, a tighter bound piles the
-    // tile's trailing samples onto a single x and draws a phantom min/max bar
-    // at every tile boundary.
-    range_t<float> xRange{0.f, float(w - 1)};
-    range_t<float> yRange{0.f, float(h - 2)};
-
-    auto toY = [&](float s) {
-        double norm = (s - mid) * invRange;
-        return (1.0 - norm) * (h * 0.5);
-    };
-
-    // Picking one sample per pixel column aliases: any component faster than
-    // the pixel rate (an IQ carrier at a few px/cycle) folds down and renders
-    // as a slow, clean-looking waveform. Up to a few samples per pixel we can
-    // afford to draw every sample; denser than that no line plot can show the
-    // waveform anyway, so draw an honest per-column min/max envelope instead.
-    static const size_t maxPointsPerPixel = 16;
-    const size_t samplesPerPx = (count + w - 1) / w;
-
-    if (samplesPerPx <= maxPointsPerPixel) {
-        const double xStep = double(w) / double(count);
-        bool first = true;
-        size_t runLen = 0;
-        double lastX = 0.0, lastY = 0.0;
-        // A run of exactly one finite sample emits a lone moveTo, and a
-        // one-element subpath draws nothing — the same invisibility the
-        // envelope branch guards against. Squelch NaNs each sample
-        // independently, so alternating NaN/finite is a real input.
-        auto endRun = [&]() {
-            if (runLen == 1 && w >= 2) {
-                double stubX = (lastX + 1.0 <= rect.x() + w - 1) ? lastX + 1.0
-                                                                 : lastX - 1.0;
-                path.lineTo(stubX, lastY);
-            }
-            first = true;
-            runLen = 0;
-        };
-        for (size_t i = 0; i < count; i++) {
-            float s = samples[i * step];
-            // Break the path at a non-finite sample, same as the envelope
-            // branch below and renderFloatTrace: clip() would otherwise fold
-            // NaN to the top of the plot and draw a full-height spike.
-            if (!std::isfinite(s)) { endRun(); continue; }
-            double x = xRange.clip(i * xStep) + rect.x();
-            double y = yRange.clip(toY(s)) + rect.y();
-            if (first) { path.moveTo(x, y); first = false; }
-            else       { path.lineTo(x, y); }
-            lastX = x; lastY = y; runLen++;
-        }
-        endRun();
-    } else {
-        bool first = true;
-        for (int x = 0; x < w; x++) {
-            const size_t begin = size_t(x) * count / w;
-            const size_t end = std::min(count, size_t(x + 1) * count / w);
-            float lo = std::numeric_limits<float>::infinity();
-            float hi = -std::numeric_limits<float>::infinity();
-            for (size_t i = begin; i < end; i++) {
-                float s = samples[i * step];
-                if (!std::isfinite(s)) continue;
-                lo = std::min(lo, s);
-                hi = std::max(hi, s);
-            }
-            if (lo > hi) { first = true; continue; }  // no finite samples: gap
-            double xr = xRange.clip(float(x)) + rect.x();
-            double yTop = yRange.clip(toY(hi)) + rect.y();
-            double yBot = yRange.clip(toY(lo)) + rect.y();
-            // A column holding a single sample gives yTop == yBot. Starting a
-            // subpath with a zero-length line draws nothing under a flat cap,
-            // so isolated bursts after a gap would vanish — give it 1px.
-            if (yBot - yTop < 1.0) yBot = yTop + 1.0;
-            if (first) { path.moveTo(xr, yTop); first = false; }
-            else       { path.lineTo(xr, yTop); }
-            path.lineTo(xr, yBot);
-        }
-    }
-    painter.drawPath(path);
-}
- 
-// Slot: called when debounce timer fires; schedule all pending tile draws
-void TracePlot::schedulePendingTiles()
-{
-    // take current pending list and clear it
-    QHash<QString, PendingInfo> info = std::move(pendingInfo);
-    pendingInfo.clear();
-    for (auto it = info.constBegin(); it != info.constEnd(); ++it) {
-        const QString &key = it.key();
-        size_t tileID = it.value().tileID;
-        size_t sampleCount = it.value().sampleCount;
-        int tilePx = it.value().tileWidth;
-        int tileH = it.value().tileHeight;
-        range_t<size_t> sampleRange{ tileID * sampleCount,
-                                    (tileID + 1) * sampleCount };
-        // launch background draw (rect size uses tilePx)
-        double minv = globalMin;
-        double maxv = globalMax;
-        if (maxv <= minv) maxv = minv + 1.0;
-        QtConcurrent::run(this, &TracePlot::drawTile,
-                         key, QRect(0, 0, tilePx, tileH), sampleRange,
-                         0.5 * (minv + maxv), 1.0 / (maxv - minv));
-        tasks.insert(key);
-    }
-}
-
-// Slot: global min/max computed in background
-void TracePlot::onMinMaxReady()
-{
-    LatencyLog::markf("traceplot[%p] minMax scan ready", (void*)this);
-    applyMinMax(minMaxWatcher->result());
-    emit repaint();
-}
-
-// Render a float trace into an offscreen image. Runs on a QtConcurrent
-// worker — the only main-thread state it touches is the SampleSource pointer,
-// which the chain already supports concurrent reads on (the complex tile
-// path has been doing exactly that since this fork landed).
-static QImage renderFloatTrace(SampleSource<float> *src,
-                               size_t start, size_t len, int w, int h,
-                               double mid, double invRange)
-{
-    LatencyLog::markf("renderFloatTrace start src=%p len=%zu w=%d", (void*)src, len, w);
-    QImage image(w, h, QImage::Format_ARGB32);
-    image.fill(Qt::transparent);
-    if (len == 0 || w < 1 || h < 1) return image;
-    auto samples = src->getSamples(start, len);
-    LatencyLog::markf("renderFloatTrace samples_ready src=%p", (void*)src);
-    if (!samples) return image;
-
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(Qt::green);
-
-    QPainterPath path;
-    bool first = true;
-    auto toY = [&](double s) {
-        double norm = (s - mid) * invRange;
-        if (norm >  1.0) norm =  1.0;
-        if (norm < -1.0) norm = -1.0;
-        return (1.0 - norm) * (h * 0.5);
-    };
-
-    // Same aliasing guard as TracePlot::plotTrace: draw every sample while
-    // that stays affordable, else an honest per-column min/max envelope —
-    // never single-sample decimation, which folds fast components down into
-    // convincing-looking low-frequency artefacts.
-    static const size_t maxPointsPerPixel = 16;
-    const size_t samplesPerPx = (len + w - 1) / w;
-
-    if (samplesPerPx <= maxPointsPerPixel) {
-        const double xStep = double(w) / double(len);
-        size_t runLen = 0;
-        double lastX = 0.0, lastY = 0.0;
-        // Same one-element-subpath hazard as the envelope branch below: a lone
-        // finite sample between two squelch NaNs would otherwise draw nothing.
-        auto endRun = [&]() {
-            if (runLen == 1 && w >= 2) {
-                double stubX = (lastX + 1.0 <= w - 1) ? lastX + 1.0 : lastX - 1.0;
-                path.lineTo(stubX, lastY);
-            }
-            first = true;
-            runLen = 0;
-        };
-        for (size_t i = 0; i < len; i++) {
-            double s = samples[i];
-            // Break the path at a non-finite sample (squelch / cold-start gap)
-            // so the next finite point starts a fresh subpath instead of
-            // bridging the gap with a straight line.
-            if (!std::isfinite(s)) { endRun(); continue; }
-            double y = toY(s);
-            double x = i * xStep;
-            if (first) { path.moveTo(x, y); first = false; }
-            else       { path.lineTo(x, y); }
-            lastX = x; lastY = y; runLen++;
-        }
-        endRun();
-    } else {
-        for (int x = 0; x < w; x++) {
-            const size_t begin = size_t(x) * len / w;
-            const size_t end = std::min(len, size_t(x + 1) * len / w);
-            double lo = std::numeric_limits<double>::infinity();
-            double hi = -std::numeric_limits<double>::infinity();
-            for (size_t i = begin; i < end; i++) {
-                double s = samples[i];
-                if (!std::isfinite(s)) continue;
-                lo = std::min(lo, s);
-                hi = std::max(hi, s);
-            }
-            if (lo > hi) { first = true; continue; }  // all-gap column
-            double yTop = toY(hi);
-            double yBot = toY(lo);
-            // Single-sample column: a zero-length subpath draws nothing, so an
-            // isolated burst after a squelch gap would be invisible. toY only
-            // clamps to [0, h], so pull yTop up first or a burst sitting at the
-            // bottom of the range extends past the last row and draws faint.
-            if (yBot - yTop < 1.0) {
-                yTop = std::min(yTop, double(h) - 1.0);
-                yBot = yTop + 1.0;
-            }
-            if (first) { path.moveTo(x, yTop); first = false; }
-            else       { path.lineTo(x, yTop); }
-            path.lineTo(x, yBot);
-        }
-    }
-    painter.drawPath(path);
-    return image;
-}
-
-void TracePlot::startFloatRender(const FloatKey &k, double mid, double invRange)
-{
-    if (!floatWatcher_) {
-        floatWatcher_ = new QFutureWatcher<QImage>(this);
-        connect(floatWatcher_, &QFutureWatcher<QImage>::finished,
-                this, &TracePlot::onFloatImageReady);
-    }
-    auto srcF = dynamic_cast<SampleSource<float>*>(sampleSource.get());
-    if (!srcF) return;
-    floatRunning_ = true;
-    floatRunningKey_ = k;
-    auto kCopy = k;
-    auto srcPtr = srcF;
-    floatWatcher_->setFuture(QtConcurrent::run([srcPtr, kCopy, mid, invRange]() {
-        return renderFloatTrace(srcPtr, kCopy.start, kCopy.len,
-                                kCopy.w, kCopy.h, mid, invRange);
+        return TraceSummary{};
     }));
 }
 
-void TracePlot::onFloatImageReady()
+void TracePlot::summaryReady()
 {
-    floatImage_ = floatWatcher_->result();
-    floatImageKey_ = floatRunningKey_;
-    floatHasImage_ = true;
-    floatRunning_ = false;
-    LatencyLog::markf("traceplot[%p] onFloatImageReady (back on GUI)", (void*)this);
-    // If the desired view has moved on while we were rendering (pan, zoom,
-    // tuner shift, FM cutoff change, etc.), kick off another render right
-    // away so the worker stays busy and the user gets continuous updates.
-    if (floatPendingValid_ && floatPendingKey_ != floatImageKey_) {
-        double minv = globalMin;
-        double maxv = globalMax;
-        if (maxv <= minv) maxv = minv + 1.0;
-        double mid = 0.5 * (minv + maxv);
-        // Scale from the key we are about to render, not from the live member.
-        // dataEpoch and scaleEpoch are monotonic, so a mismatch there can only
-        // produce an image keyed to a generation that is never minted again —
-        // but yScale is not, so reading it live would cache a wheel-zoomed
-        // image under the pre-zoom key and blit it back when the user returns.
-        double invRange = floatPendingKey_.yScale / (maxv - minv);
-        startFloatRender(floatPendingKey_, mid, invRange);
+    busy = false;
+    if (wanted && running == desired && !cancel->load()) {
+        summary = watcher->result();
+        completed = running;
+        hasSummary = true;
+        if (std::isfinite(summary.minimum) && std::isfinite(summary.maximum)) {
+            globalMin = summary.minimum;
+            globalMax = summary.maximum > globalMin ? summary.maximum : globalMin+1;
+        }
     }
+    if (wanted && (!hasSummary || completed != desired)) startSummary();
     emit repaint();
+}
+
+void TracePlot::drawSummary(QPainter &painter, const QRect &rect)
+{
+    if (!summary.complete || rect.width() < 1 || rect.height() < 1) return;
+    const double mid = .5*(globalMin+globalMax);
+    const double scale = (summary.channels == 1 ? yScale : 1.0)/(globalMax-globalMin);
+    auto y = [&](float value) {
+        return rect.y()+std::max(0.0, std::min(double(rect.height()-1),
+            (1.0-(value-mid)*scale)*rect.height()*.5));
+    };
+    painter.save();
+    painter.setClipRect(rect, Qt::IntersectClip);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (int c = 0; c < summary.channels; ++c) {
+        painter.setPen(summary.channels == 1 ? Qt::green : c == 0 ? Qt::red : Qt::blue);
+        QPainterPath path;
+        bool first = true;
+        size_t run = 0;
+        double lastX = 0, lastY = 0;
+        auto endRun = [&] {
+            if (run == 1 && rect.width() >= 2)
+                path.lineTo(lastX < rect.right() ? lastX+1 : lastX-1, lastY);
+            first = true; run = 0;
+        };
+        if (summary.dense) {
+            const auto &points = summary.points[c];
+            for (size_t i = 0; i < points.size(); ++i) {
+                if (!std::isfinite(points[i])) { endRun(); continue; }
+                lastX = rect.x()+std::min(double(rect.width()-1), double(i)*rect.width()/points.size());
+                lastY = y(points[i]);
+                if (first) path.moveTo(lastX, lastY);
+                else path.lineTo(lastX, lastY);
+                first = false; ++run;
+            }
+            endRun();
+        } else {
+            for (int x = 0; x < summary.width; ++x) {
+                const auto &bucket = summary.columns[c][x];
+                if (bucket.low > bucket.high) { first = true; continue; }
+                const double px = rect.x()+double(x)*rect.width()/summary.width;
+                double top = y(bucket.high), bottom = y(bucket.low);
+                if (bottom-top < 1) {
+                    top = std::min(top, double(rect.bottom())-1);
+                    bottom = top+1;
+                }
+                if (first) path.moveTo(px, top);
+                else path.lineTo(px, top);
+                path.lineTo(px, bottom);
+                first = false;
+            }
+        }
+        painter.drawPath(path);
+    }
+    painter.restore();
 }

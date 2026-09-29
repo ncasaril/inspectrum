@@ -20,6 +20,7 @@
 #include <QMutexLocker>
 #include <string.h>
 #include "samplebuffer.h"
+#include "memorytrace.h"
 
 template <typename Tin, typename Tout>
 SampleBuffer<Tin, Tout>::SampleBuffer(std::shared_ptr<SampleSource<Tin>> src) : src(src)
@@ -37,6 +38,9 @@ template <typename Tin, typename Tout>
 std::unique_ptr<Tout[]> SampleBuffer<Tin, Tout>::getSamples(size_t start, size_t length)
 {
     auto history = std::min(start, this->historySize());
+    MemoryTrace::request("transform-input-temp-output", this, start, length,
+        (static_cast<long double>(length)+history)*(sizeof(Tin)+sizeof(Tout)) +
+        static_cast<long double>(length)*sizeof(Tout));
     auto samples = src->getSamples(start - history, length + history);
     if (samples == nullptr)
         return nullptr;

@@ -389,4 +389,8 @@ void MainWindow::addSpectrumPlot(SpectrumView *plot)
     });
 
     addDockWidget(Qt::RightDockWidgetArea, spectrumDock);
+    connect(spectrumDock, &QDockWidget::topLevelChanged, plots, &PlotView::updateSpectrumGeometry,
+            Qt::QueuedConnection);
+    connect(spectrumDock, &QDockWidget::visibilityChanged, plots, &PlotView::updateSpectrumGeometry,
+            Qt::QueuedConnection);
 }

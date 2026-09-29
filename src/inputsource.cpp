@@ -19,6 +19,7 @@
  */
 
 #include "inputsource.h"
+#include "memorytrace.h"
 #include <QSaveFile>
 
 #include <math.h>
@@ -1024,6 +1025,7 @@ std::unique_ptr<std::complex<float>[]> InputSource::getSamples(size_t start, siz
     if (start + length > sampleCount)
         return nullptr;
 
+    MemoryTrace::request("input-IQ-copy", this, start, length, 8.0L*length);
     auto dest = std::make_unique<std::complex<float>[]>(length);
     sampleAdapter->copyRange(mmapData + dataOffset, start, length, dest.get());
 

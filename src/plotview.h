@@ -74,6 +74,8 @@ public:
     // marker at the column currently being shown.
     bool spectrumMarkerEnabled() const { return spectrumMarkerOn; }
     void setSpectrumMarkerEnabled(bool on);
+    void centerSpectrumMarker();
+    size_t spectrumMarkerPosition() const { return spectrumMarkerSample; }
     QJsonObject analysisViewState() const;
     std::shared_ptr<SampleSource<std::complex<float>>> analysisSource(bool tuned);
     void focusAnalysisRange(size_t start, size_t count);
@@ -105,6 +107,9 @@ signals:
     void spectrumPlotAdded(SpectrumView *plot);
 
 public slots:
+    void updateSpectrumGeometry();
+    void revealSpectrumFrequency(double frequency);
+    void addSpectrumPlot();
     void cancelAnnotationEdit();
     void cursorsMoved();
     void enableCursors(bool enabled);
@@ -218,8 +223,8 @@ private:
     bool annotationColorsEnabled;
 
     void addPlot(Plot *plot);
-    void addSpectrumPlot();
     void updateSpectrumPlots();
+    QPair<int, int> sharedFrequencyBounds() const;
     void emitTimeSelection();
     // Read a single-sample value from a derived plot's source (FM/AM = float,
     // IQ = complex<float>) and format for display in the status bar.

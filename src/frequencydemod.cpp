@@ -18,6 +18,7 @@
  */
 
 #include "frequencydemod.h"
+#include "memorytrace.h"
 #include <liquid/liquid.h>
 #include <QDebug>
 #include <QMutexLocker>
@@ -448,6 +449,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
     // Pull raw IQ from the upstream tuner. This one big getSamples call
     // does the upstream lead-in once (Kaiser FIR tuner cold-start), so the
     // freqdem and post-LPF below see a continuous, fully-warmed input.
+    MemoryTrace::request("FM-batch-IQ-input", this, start, batchLen, 8.0L*batchLen);
     auto rawIq = src->getSamples(start, batchLen);
     if (!rawIq) return false;
 
@@ -665,6 +667,7 @@ bool FrequencyDemod::fillBatchCache(size_t needStart, size_t needEnd)
 
 std::unique_ptr<float[]> FrequencyDemod::getSamples(size_t start, size_t length)
 {
+    MemoryTrace::request("FM-request", this, start, length, 4.0L*length);
     // Snapshot under the main mutex so we can decide which path to take
     // without holding it through the slow filter run.
     LpfMethod method;
